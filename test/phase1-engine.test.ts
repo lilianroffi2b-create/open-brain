@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -68,17 +68,19 @@ function record(
   };
 }
 
-test("GC proposes safely and applies only approved reviews without deleting content", async (t) => {
+test("GC proposes safely and applies approved reviews by archiving, never deleting", async (t) => {
   const config = createConfig();
   const root = await createVault(config);
   t.after(async () => rm(root, { recursive: true, force: true }));
 
-  const coldPath = `${config.root_label}/10_memory/cold.md`;
-  const sourcePath = join(root, "10_memory", "cold.md");
-  await writeFile(sourcePath, "Keep this source file.", "utf8");
+  const coldRel = "10_memory/cold.md";
+  const coldPath = `${config.root_label}/${coldRel}`;
+  const coldAbsolute = join(root, coldRel);
+  const coldSha = "c".repeat(64);
+  await writeFile(coldAbsolute, "Archive this cold note.", "utf8");
 
   const proposal = proposeGc([
-    record(coldPath, { tier: "cold" }),
+    record(coldPath, { tier: "cold", sha256: coldSha }),
     record(`${config.root_label}/10_memory/expired.md`, {
       lifecycle: "ephemeral",
       expires: "2020-01-01",
@@ -94,8 +96,9 @@ test("GC proposes safely and applies only approved reviews without deleting cont
     proposal.candidates.map((candidate) => candidate.path),
     [`${config.root_label}/10_memory/cold.md`, `${config.root_label}/10_memory/expired.md`],
   );
+
   await assert.rejects(
-    applyReviewedGcProposal(root, config, proposal, [record(coldPath)]),
+    applyReviewedGcProposal(root, config, proposal, []),
     /approved/,
   );
 
@@ -109,16 +112,25 @@ test("GC proposes safely and applies only approved reviews without deleting cont
     root,
     config,
     reviewed,
-    [record(coldPath)],
+    [record(coldPath, { tier: "cold", sha256: coldSha })],
     new Date("2026-07-09T12:02:00.000Z"),
   );
 
-  assert.equal(applied.deleted_count, 0);
-  assert.equal(await readFile(sourcePath, "utf8"), "Keep this source file.");
-  assert.equal(
-    (await readFile(join(root, applied.report_path), "utf8")).includes("synthetic-review"),
-    true,
+  // cold.md still qualifies and is archived; expired.md is absent from the
+  // current catalog and is safely refused.
+  assert.equal(applied.archived_count, 1);
+  assert.equal(applied.missing_count, 1);
+  const archivedAbsolute = join(root, config.paths.archive, "2026", coldRel);
+  assert.equal(await readFile(archivedAbsolute, "utf8"), "Archive this cold note.");
+  await assert.rejects(readFile(coldAbsolute, "utf8"));
+  const archiveIndex = await readFile(
+    join(root, config.paths.archive, "2026", "_index.md"),
+    "utf8",
   );
+  assert.equal(archiveIndex.includes("10_memory/cold.md"), true);
+  const report = await readFile(join(root, applied.report_path), "utf8");
+  assert.equal(report.includes("synthetic-review"), true);
+  assert.equal(report.includes("\"archived_count\": 1"), true);
 });
 
 test("health validates canonical directories, freshness, shard integrity, and status can repair indexes", async (t) => {
@@ -127,18 +139,38 @@ test("health validates canonical directories, freshness, shard integrity, and st
   t.after(async () => rm(root, { recursive: true, force: true }));
   const now = new Date("2026-07-09T12:00:00.000Z");
 
+  const notePath = join(root, "10_memory", "note.md");
   await writeFile(
-    join(root, "10_memory", "note.md"),
+    notePath,
     "---\nlifecycle: working\n---\n# A test note\n",
     "utf8",
   );
   const scan = await scanVault(root, config, { now, gitTimes: new Map() });
   await writeIndexArtifacts(root, config, scan, { now, writeDelta: false });
+  // Pin the content mtime before the scan clock so the freshness "changes"
+  // check is deterministic (no spurious drift from the real wall clock).
+  const pinned = new Date("2026-01-01T00:00:00.000Z");
+  await utimes(notePath, pinned, pinned);
 
   const healthy = await checkVaultHealth(root, config, { now });
   assert.equal(healthy.healthy, true);
   assert.equal(healthy.stale, false);
   assert.equal(healthy.checks.some((check) => check.name === "shards" && check.severity === "ok"), true);
+  assert.equal(healthy.checks.some((check) => check.name === "changes" && check.severity === "ok"), true);
+
+  // A newer edit trips the freshness signal so status --auto rescans on it.
+  const laterEdit = new Date("2026-07-09T13:00:00.000Z");
+  await utimes(notePath, laterEdit, laterEdit);
+  const drifted = await checkVaultHealth(root, config, {
+    now: new Date("2026-07-09T18:00:00.000Z"),
+  });
+  assert.equal(drifted.stale, true);
+  assert.equal(
+    drifted.checks.some((check) => check.name === "changes" && check.severity === "warning"),
+    true,
+  );
+  // Restore the pinned mtime so the remaining checks see no spurious drift.
+  await utimes(notePath, pinned, pinned);
 
   await writeFile(join(root, config.paths.catalog_shards, "10_memory.json"), "{}\n", "utf8");
   const corrupted = await checkVaultHealth(root, config, { now });

@@ -18,16 +18,18 @@ export function cleanLinkTarget(link: string): string | undefined {
     lower.startsWith("http://")
     || lower.startsWith("https://")
     || lower.startsWith("mailto:")
-    || lower.startsWith("file:")
-    || value.startsWith("/")
-    || /^[a-z]:[\\/]/iu.test(value)
+    || lower.startsWith("/users/")
+    || lower.startsWith("/home/")
   ) {
+    return undefined;
+  }
+  if (/^[a-z]:[\\/]/iu.test(value)) {
     return undefined;
   }
   if (!/[a-z0-9]/iu.test(value)) {
     return undefined;
   }
-  value = value.replace(/^(\.\/|\.\.\/)+/u, "").replace(/^\/+/u, "");
+  value = value.replace(/^(\.\.?\/)+/u, "").replace(/^\/+/u, "");
   return value || undefined;
 }
 

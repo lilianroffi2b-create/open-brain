@@ -1,0 +1,120 @@
+{
+  "route": {
+    "query": "planning beta",
+    "route": "planning",
+    "route_score": 18,
+    "intent": "Find planning context",
+    "always_read": [
+      "10_memory/alpha.md"
+    ],
+    "read_order": [
+      "20_contexts/"
+    ],
+    "max_files": 2,
+    "deep_sources": false,
+    "budget": {
+      "files": 2,
+      "read_bytes": 220,
+      "read_tokens": 55,
+      "layers_loaded": [
+        "10_memory",
+        "20_contexts"
+      ],
+      "catalog_docs_scored": 3
+    },
+    "files": [
+      {
+        "path": "FixtureBrain/10_memory/alpha.md",
+        "kind": "note",
+        "domain": "general",
+        "size": 140,
+        "read_priority": 55,
+        "route_score": 1000,
+        "baseline": true,
+        "summary": "Alpha Plan"
+      },
+      {
+        "path": "FixtureBrain/20_contexts/beta.md",
+        "kind": "note",
+        "domain": "general",
+        "size": 80,
+        "read_priority": 55,
+        "route_score": 99,
+        "baseline": false,
+        "summary": "Beta Context"
+      }
+    ]
+  },
+  "gc_candidates": [
+    {
+      "path": "FixtureBrain/10_memory/old-2020-01-01.md",
+      "reason": "cold_unreferenced",
+      "tier": "cold",
+      "lifecycle": "working"
+    }
+  ],
+  "health": {
+    "healthy": false,
+    "stale": false,
+    "index_available": true,
+    "checks": [
+      {
+        "name": "directory:00_index",
+        "severity": "ok"
+      },
+      {
+        "name": "directory:01_inbox",
+        "severity": "error"
+      },
+      {
+        "name": "directory:10_memory",
+        "severity": "ok"
+      },
+      {
+        "name": "directory:20_contexts",
+        "severity": "ok"
+      },
+      {
+        "name": "directory:30_skills",
+        "severity": "error"
+      },
+      {
+        "name": "directory:40_sources",
+        "severity": "ok"
+      },
+      {
+        "name": "directory:50_outputs",
+        "severity": "error"
+      },
+      {
+        "name": "directory:70_engine",
+        "severity": "error"
+      },
+      {
+        "name": "directory:90_archive",
+        "severity": "error"
+      },
+      {
+        "name": "freshness",
+        "severity": "ok"
+      },
+      {
+        "name": "changes",
+        "severity": "ok"
+      },
+      {
+        "name": "catalog",
+        "severity": "ok"
+      },
+      {
+        "name": "shards",
+        "severity": "ok"
+      }
+    ]
+  },
+  "status": {
+    "rescanned": false,
+    "healthy": false,
+    "stale": false
+  }
+}

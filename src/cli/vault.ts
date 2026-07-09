@@ -21,7 +21,9 @@ import {
   loadConfig,
 } from "../core/config.js";
 import {
+  dismissIdea,
   getFreeModeStatePath,
+  isIdeaDismissed,
   loadFreeModeLocalState,
   readFreeMode,
   saveFreeModeLocalState,
@@ -74,6 +76,15 @@ export interface FreeModeStatus {
   createdAt: string;
   updatedAt: string;
   dismissedIdeaCount: number;
+}
+
+export interface IdeaCheckResult {
+  dismissed: boolean;
+}
+
+export interface FreeModeResetResult {
+  root: string;
+  removed: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -569,6 +580,64 @@ export async function getVaultFreeModeStatus(start?: string): Promise<FreeModeSt
     updatedAt: state.updatedAt,
     dismissedIdeaCount: state.dismissedIdeaFingerprints.length,
   };
+}
+
+/** Reads the configured Free Mode without loading full local state. */
+async function readVaultMode(root: string): Promise<FreeMode> {
+  const config = await readConfigText(root);
+  return readFreeMode(parseYaml(config.text) as unknown);
+}
+
+/**
+ * Fingerprints an idea and records the opaque hash in local state so it is
+ * never proposed again. The raw idea text is never written to disk.
+ */
+export async function dismissIdeaInVault(
+  start: string | undefined,
+  idea: string,
+): Promise<FreeModeStatus> {
+  const root = await resolveVaultRoot(start);
+  const mode = await readVaultMode(root);
+  const state = await loadFreeModeLocalState(root, mode);
+  const nextState = dismissIdea(state, idea);
+  await saveFreeModeLocalState(root, nextState);
+  return {
+    mode: nextState.mode,
+    createdAt: nextState.createdAt,
+    updatedAt: nextState.updatedAt,
+    dismissedIdeaCount: nextState.dismissedIdeaFingerprints.length,
+  };
+}
+
+/** Reports whether an idea's fingerprint is already in the dismissed set. */
+export async function checkIdeaInVault(
+  start: string | undefined,
+  idea: string,
+): Promise<IdeaCheckResult> {
+  const root = await resolveVaultRoot(start);
+  const mode = await readVaultMode(root);
+  const state = await loadFreeModeLocalState(root, mode);
+  return { dismissed: isIdeaDismissed(state, idea) };
+}
+
+/**
+ * Deletes the local Free Mode state file, erasing all remembered dismissals.
+ * This is the only path that purges local state; toggling Free Mode never does.
+ */
+export async function resetFreeModeState(
+  start?: string,
+): Promise<FreeModeResetResult> {
+  const root = await resolveVaultRoot(start);
+  const statePath = getFreeModeStatePath(root);
+  try {
+    await unlink(statePath);
+    return { root, removed: true };
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return { root, removed: false };
+    }
+    throw error;
+  }
 }
 
 export const DEFAULT_CANONICAL_DIRECTORIES = [...DEFAULT_CONFIG.canonical_dirs];

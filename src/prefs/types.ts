@@ -30,7 +30,7 @@ export interface Preference {
   origin: string;
   last_seen: string;
   evidence: PreferenceEvidence[];
-  core: boolean;
+  core?: boolean;
   scoped?: boolean;
   source?: string;
   links?: string[];

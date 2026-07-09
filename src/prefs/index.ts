@@ -14,9 +14,13 @@ export {
 
 export {
   assertValidPreferenceLedger,
+  CORE_MIN_WEIGHT,
+  effectiveCore,
   isLedgerDate,
   isPreferenceStatus,
   isPreferenceWeight,
+  PREFERENCE_ID_PATTERN,
+  shouldAutoRegen,
   validatePreferenceLedger,
 } from "./validation.js";
 
@@ -27,6 +31,7 @@ export {
   getCorePreferences,
   listPreferences,
   logPreference,
+  type PreferenceAddInput,
 } from "./ledger.js";
 
 export { renderPreferenceCore, renderPreferenceMirror } from "./render.js";

@@ -56,6 +56,13 @@ function safeName(value: string): string {
   return compact || "import";
 }
 
+const UNICODE_REPLACEMENT = String.fromCharCode(0xfffd);
+
+function decodeIngestContent(bytes: Buffer): string {
+  const utf8 = bytes.toString("utf8");
+  return utf8.includes(UNICODE_REPLACEMENT) ? bytes.toString("latin1") : utf8;
+}
+
 function batchIdentifier(now: Date, supplied?: string): string {
   if (supplied && /^[a-z0-9][a-z0-9_-]*$/u.test(supplied)) {
     return supplied;
@@ -285,7 +292,7 @@ export async function ingestInbox(
 
     try {
       const bytes = await readFile(sourcePath);
-      const content = bytes.toString("utf8");
+      const content = decodeIngestContent(bytes);
       const documents = extractIngestDocuments(sourcePath, content);
       if (documents.length === 0) {
         report.ignored.push(relativeSourcePath);

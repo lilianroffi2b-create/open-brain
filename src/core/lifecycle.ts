@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 
+import { toPosixPath } from "./text.js";
 import type { Lifecycle, ThermalTier, VaultConfig } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -175,6 +176,59 @@ export function thermalTier(
     return "cold";
   }
   return "warm";
+}
+
+export interface GcGuardContext {
+  /** Vault-relative path with the root label already stripped. */
+  relativePath: string;
+  lifecycle: Lifecycle;
+  kind: string;
+  hasIncoming: boolean;
+  active: boolean;
+  routingRefs: ReadonlySet<string>;
+  config: VaultConfig;
+}
+
+/**
+ * Structural guardrails shared by gc propose and gc apply: returns a reason
+ * string when a document must NOT be archived, or undefined when it may be. The
+ * same guards run at both stages so an apply re-verifies everything the proposal
+ * asserted. Ported from brain_lifecycle.gc_guard_reason; the two vault-specific
+ * literal guards (cadrage and pilotage docs) are intentionally not ported since
+ * open-brain is generic and covers the same intent through config.activity.
+ */
+export function gcGuardReason(context: GcGuardContext): string | undefined {
+  const { relativePath, lifecycle, kind, hasIncoming, active, routingRefs, config } = context;
+  const name = basename(relativePath);
+  const indexPrefix = toPosixPath(config.paths.index).replace(/\/+$/u, "") + "/";
+  const archivePrefix = toPosixPath(config.paths.archive).replace(/\/+$/u, "") + "/";
+  const preferencesPrefix = toPosixPath(config.paths.memory).replace(/\/+$/u, "") + "/preferences/";
+
+  if (name === "_index.md" || kind === "index") {
+    return "index_page";
+  }
+  if (lifecycle === "master") {
+    return "lifecycle_master";
+  }
+  if (relativePath.startsWith(indexPrefix)) {
+    return "index_zone";
+  }
+  if (relativePath.startsWith(preferencesPrefix)) {
+    return "preferences_zone";
+  }
+  if (relativePath.startsWith(archivePrefix)) {
+    return "already_archived";
+  }
+  if (routingRefs.has(relativePath)) {
+    return "routing_reference";
+  }
+  if (active) {
+    return "active_chantier";
+  }
+  if (hasIncoming) {
+    return "has_incoming_link";
+  }
+  return undefined;
 }
 
 export function isExpired(expires: string | undefined, now = new Date()): boolean {

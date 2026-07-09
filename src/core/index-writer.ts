@@ -212,7 +212,7 @@ export async function writeIndexArtifacts(
     );
     const deltaDirectory = join(root, config.paths.deltas);
     const deltas = (await readdir(deltaDirectory))
-      .filter((entry) => /^scan-delta-\d{4}-\d{2}-\d{2}_\d{6}\.md$/u.test(entry))
+      .filter((entry) => /^scan-delta-\d{4}-\d{2}-\d{2}_\d{9}\.md$/u.test(entry))
       .sort();
     for (const stale of deltas.slice(0, Math.max(0, deltas.length - config.deltas.retention))) {
       await unlink(join(deltaDirectory, stale));

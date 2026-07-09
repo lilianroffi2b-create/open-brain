@@ -30,6 +30,8 @@ npm pack --dry-run
 
 The golden suite uses synthetic fixtures to protect parity without shipping personal data. The package audit validates the publish allowlist. Before submitting a change, make sure a clean installation of the packed tarball can invoke the CLI.
 
+`bin/cli.js` is no longer committed. Run `npm run build` before using the CLI from a fresh checkout; `npx` and `npm pack` regenerate it automatically through the `prepack` script.
+
 ## Pull requests
 
 Keep pull requests focused and describe:

@@ -8,7 +8,7 @@ Security fixes are assessed for the current supported release line. Pre-release 
 
 Do not open a public issue for a suspected vulnerability.
 
-When private vulnerability reporting is enabled for the repository, use that channel and include:
+Use GitHub's private vulnerability reporting for this repository at https://github.com/lilianroffi2b-create/open-brain/security/advisories/new and include:
 
 - a concise description of the issue;
 - the affected version or commit;
