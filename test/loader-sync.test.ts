@@ -39,6 +39,14 @@ test("loader sync preserves outside text, replaces generated content once, and i
   assert.equal(occurrences(once, OPENBRAIN_LOADER_END_MARKER), 1);
   assert.equal(once.includes("Free Mode check: A leads to [consequence]."), true);
   assert.equal(once.includes("One optional idea: [idea]."), true);
+  assert.equal(once.includes("open-brain free-mode check"), true);
+  assert.equal(once.includes("open-brain free-mode dismiss"), true);
+  assert.equal(once.includes("open-brain free-mode reset"), true);
+  assert.equal(once.includes("at most one material checkpoint per turn"), true);
+
+  const offBlock = syncLoaderContent("", "off");
+  assert.equal(offBlock.includes("Free Mode is off."), true);
+  assert.equal(offBlock.includes("open-brain free-mode check"), false);
 
   const inserted = syncLoaderContent("User text without markers.", "off");
   assert.equal(inserted.includes("User text without markers."), true);

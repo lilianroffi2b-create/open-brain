@@ -1,21 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
-  canShowFreeModeCheckpoint,
-  chooseAttentionPrompt,
   createFreeModeLocalState,
-  createFreeModeRequestBudget,
   dismissIdea,
-  evaluateOptionalIdea,
   fingerprintIdea,
   getFreeModeStatePath,
   loadFreeModeLocalState,
-  markFreeModeCheckpointShown,
-  OptionalIdeaSession,
   parseFreeMode,
   readFreeMode,
   saveFreeModeLocalState,
@@ -23,6 +17,23 @@ import {
   validateFreeModeLocalState,
   type VaultConfigLike,
 } from "../src/free-mode/index.js";
+import {
+  checkIdeaInVault,
+  dismissIdeaInVault,
+  pathExists,
+  resetFreeModeState,
+} from "../src/cli/vault.js";
+
+async function makeVault(freeMode: "off" | "calibrated"): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "open-brain-free-mode-"));
+  await mkdir(join(root, "00_index"), { recursive: true });
+  await writeFile(
+    join(root, "00_index", "vault.config.yml"),
+    ["interaction:", `  free_mode: ${freeMode}`, ""].join("\n"),
+    "utf8",
+  );
+  return root;
+}
 
 test("Free Mode config defaults off and updates immutably", () => {
   const original: VaultConfigLike = {
@@ -86,108 +97,36 @@ test("local state persists only safe metadata and opaque dismissed fingerprints"
   );
 });
 
-test("optional ideas are disabled off, once per session, and never repeated after dismissal", () => {
-  const candidate = {
-    idea: "Add a reusable source-quality check",
-    isNovel: true,
-    isDirectlySupported: true,
-    isMaterial: true,
-    isSafelyDeferrable: true,
-  };
-  const state = createFreeModeLocalState("calibrated");
-  const session = new OptionalIdeaSession();
+test("dismiss records an opaque fingerprint, check reads it, reset erases the file", async (t) => {
+  const root = await makeVault("calibrated");
+  t.after(async () => rm(root, { recursive: true, force: true }));
 
-  assert.equal(
-    evaluateOptionalIdea("off", session, state, candidate).reason,
-    "free_mode_off",
-  );
+  const idea = "Add a reusable source-quality check";
+  const statePath = getFreeModeStatePath(root);
 
-  assert.equal(
-    evaluateOptionalIdea("calibrated", session, state, candidate).eligible,
-    true,
-  );
-  session.markOptionalIdeaOffered();
-  assert.equal(
-    evaluateOptionalIdea("calibrated", session, state, candidate).reason,
-    "already_offered_this_session",
-  );
+  assert.equal(await pathExists(statePath), false);
+  assert.deepEqual(await checkIdeaInVault(root, idea), { dismissed: false });
+  assert.equal(await pathExists(statePath), false);
 
-  const dismissed = dismissIdea(state, candidate.idea);
-  assert.equal(
-    evaluateOptionalIdea(
-      "calibrated",
-      new OptionalIdeaSession(),
-      dismissed,
-      candidate,
-    ).reason,
-    "dismissed",
-  );
-});
+  const dismissed = await dismissIdeaInVault(root, idea);
+  assert.equal(dismissed.mode, "calibrated");
+  assert.equal(dismissed.dismissedIdeaCount, 1);
 
-test("Free Mode checkpoints require material evidence and obey the shared attention priority", () => {
-  const budget = createFreeModeRequestBudget();
-  assert.equal(
-    canShowFreeModeCheckpoint({
-      mode: "calibrated",
-      budget,
-      materialAlternative: true,
-      atSafeBoundary: true,
-    }),
-    true,
-  );
-  assert.equal(
-    canShowFreeModeCheckpoint({
-      mode: "calibrated",
-      budget,
-      materialAlternative: false,
-      atSafeBoundary: true,
-    }),
-    false,
-  );
-  assert.equal(
-    canShowFreeModeCheckpoint({
-      mode: "off",
-      budget,
-      materialAlternative: true,
-      atSafeBoundary: true,
-    }),
-    false,
-  );
-  assert.equal(
-    canShowFreeModeCheckpoint({
-      mode: "calibrated",
-      budget: markFreeModeCheckpointShown(budget),
-      materialAlternative: true,
-      atSafeBoundary: true,
-    }),
-    false,
-  );
+  const raw = await readFile(statePath, "utf8");
+  const stored = JSON.parse(raw) as { dismissedIdeaFingerprints: string[] };
+  assert.equal(raw.includes(idea), false);
+  assert.match(stored.dismissedIdeaFingerprints[0] ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(stored.dismissedIdeaFingerprints[0], fingerprintIdea(idea));
 
-  const base = {
-    mode: "calibrated" as const,
-    safetyConfirmationRequired: false,
-    materialFreeModeAlternative: true,
-    atSafeBoundary: true,
-    freeModeCheckpointAlreadyShown: false,
-    hermesNudgeAvailable: true,
-    optionalIdeaAvailable: true,
-  };
+  assert.deepEqual(await checkIdeaInVault(root, idea), { dismissed: true });
 
-  assert.equal(
-    chooseAttentionPrompt({ ...base, safetyConfirmationRequired: true }),
-    "safety-confirmation",
-  );
-  assert.equal(chooseAttentionPrompt(base), "free-mode-checkpoint");
-  assert.equal(
-    chooseAttentionPrompt({ ...base, freeModeCheckpointAlreadyShown: true }),
-    "hermes-preference-nudge",
-  );
-  assert.equal(
-    chooseAttentionPrompt({
-      ...base,
-      freeModeCheckpointAlreadyShown: true,
-      hermesNudgeAvailable: false,
-    }),
-    "optional-idea",
-  );
+  const firstReset = await resetFreeModeState(root);
+  assert.equal(firstReset.removed, true);
+  assert.equal(await pathExists(statePath), false);
+
+  assert.deepEqual(await checkIdeaInVault(root, idea), { dismissed: false });
+  assert.equal(await pathExists(statePath), false);
+
+  const secondReset = await resetFreeModeState(root);
+  assert.equal(secondReset.removed, false);
 });

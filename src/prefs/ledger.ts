@@ -9,9 +9,11 @@ import {
 } from "./types.js";
 import {
   assertValidPreferenceLedger,
+  effectiveCore,
   isLedgerDate,
   isPreferenceStatus,
   isPreferenceWeight,
+  PREFERENCE_ID_PATTERN,
 } from "./validation.js";
 
 function clonePreference(preference: Preference): Preference {
@@ -21,13 +23,6 @@ function clonePreference(preference: Preference): Preference {
     domains: [...domains],
     ...(links ? { links: [...links] } : {}),
     evidence: evidence.map((event) => ({ ...event })),
-  };
-}
-
-function cloneLedger(ledger: PreferenceLedger): PreferenceLedger {
-  return {
-    ...ledger,
-    preferences: ledger.preferences.map(clonePreference),
   };
 }
 
@@ -70,14 +65,70 @@ export function derivePreferenceStatus(
   return "proposed";
 }
 
+export interface PreferenceAddInput {
+  id: string;
+  text: string;
+  weight: PreferenceWeight;
+  status?: PreferenceStatus;
+  date?: string;
+  core?: boolean;
+}
+
+/**
+ * Builds a complete, valid preference from the minimal fields a user supplies
+ * (id, text, weight, and optional status/date/core) and appends it. Missing
+ * schema fields are filled with honest defaults derived from the input: the
+ * statement, why, and apply all reuse the supplied text, and the domain is
+ * generic. Status defaults to "active"; the date defaults to today.
+ */
 export function addPreference(
   ledger: PreferenceLedger,
-  preference: Preference,
+  input: PreferenceAddInput,
+  now: Date = new Date(),
 ): PreferenceLedger {
   assertValidPreferenceLedger(ledger);
+
+  if (typeof input.id !== "string" || !PREFERENCE_ID_PATTERN.test(input.id)) {
+    throw new TypeError("Preference id must be a kebab-case identifier.");
+  }
+  if (ledger.preferences.some((preference) => preference.id === input.id)) {
+    throw new RangeError(`Preference id already exists: ${input.id}.`);
+  }
+  if (typeof input.text !== "string" || input.text.trim().length === 0) {
+    throw new TypeError("Preference text must be a non-empty string.");
+  }
+  if (!isPreferenceWeight(input.weight)) {
+    throw new TypeError("Preference weight must be from 1 through 5.");
+  }
+  if (input.status !== undefined && !isPreferenceStatus(input.status)) {
+    throw new TypeError("Preference status is invalid.");
+  }
+  if (input.date !== undefined && !isLedgerDate(input.date)) {
+    throw new TypeError("Preference date must be YYYY-MM-DD.");
+  }
+  if (input.core !== undefined && typeof input.core !== "boolean") {
+    throw new TypeError("Preference core must be a boolean when provided.");
+  }
+
+  const date = input.date ?? toLedgerDate(now);
+  const text = input.text.trim();
+  const preference: Preference = {
+    id: input.id,
+    weight: input.weight,
+    status: input.status ?? "active",
+    domains: ["general"],
+    statement: text,
+    why: text,
+    apply: text,
+    origin: date,
+    last_seen: date,
+    evidence: [],
+    ...(input.core === undefined ? {} : { core: input.core }),
+  };
+
   const next: PreferenceLedger = {
-    ...cloneLedger(ledger),
-    preferences: [...ledger.preferences.map(clonePreference), clonePreference(preference)],
+    ...ledger,
+    preferences: [...ledger.preferences.map(clonePreference), preference],
   };
   assertValidPreferenceLedger(next);
   return next;
@@ -176,6 +227,6 @@ export function listPreferences(
 
 export function getCorePreferences(ledger: PreferenceLedger): Preference[] {
   return listPreferences(ledger).filter(
-    (preference) => preference.core && preference.status !== "retired",
+    (preference) => effectiveCore(preference) && preference.status !== "retired",
   );
 }

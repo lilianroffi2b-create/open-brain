@@ -1,15 +1,32 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 
-import { isExpired } from "./lifecycle.js";
+import { buildGraph, stripRootLabel } from "./graph.js";
+import {
+  activePathsFromConfig,
+  gcGuardReason,
+  isActive,
+  isExpired,
+} from "./lifecycle.js";
+import { loadRouting } from "./route.js";
 import { toPosixPath } from "./text.js";
-import type { CatalogRecord, GraphEnvelope, VaultConfig } from "./types.js";
+import type {
+  CatalogRecord,
+  GraphEnvelope,
+  RoutingDocument,
+  VaultConfig,
+} from "./types.js";
+
+const execFileAsync = promisify(execFile);
 
 export const GC_PROPOSAL_SCHEMA_VERSION = 1;
 
 export type GcCandidateReason = "expired_ephemeral" | "cold_unreferenced";
 export type GcReviewDecision = "approved" | "rejected";
+export type GcApplyOutcome = "archived" | "refused";
 
 export interface GcCandidate {
   path: string;
@@ -33,23 +50,32 @@ export interface GcProposal {
   review?: GcReview;
 }
 
+export interface GcAppliedCandidate extends GcCandidate {
+  current: "unchanged" | "changed" | "missing";
+  outcome: GcApplyOutcome;
+  detail: string;
+  archived_to?: string;
+}
+
 export interface GcApplyResult {
   schema_version: typeof GC_PROPOSAL_SCHEMA_VERSION;
   proposal_id: string;
   applied_at: string;
   review: GcReview;
-  candidates: Array<GcCandidate & { current: "unchanged" | "changed" | "missing" }>;
-  deleted_count: 0;
+  candidates: GcAppliedCandidate[];
+  archive_root: string;
+  archived_count: number;
+  refused_guard_count: number;
+  sha_mismatch_count: number;
+  missing_count: number;
+  move_failed_count: number;
   report_path: string;
 }
 
 export interface GcProposalOptions {
   graph?: GraphEnvelope;
+  routing?: RoutingDocument;
   now?: Date;
-}
-
-function pathPrefix(rootLabel: string, relativePath: string): string {
-  return `${rootLabel}/${toPosixPath(relativePath).replace(/^\/+|\/+$/gu, "")}/`;
 }
 
 function proposalId(now: Date): string {
@@ -75,9 +101,89 @@ function writeAtomic(path: string, content: string): Promise<void> {
   })();
 }
 
+function routingRefsFromDocument(routing: RoutingDocument | undefined): Set<string> {
+  const refs = new Set<string>();
+  if (!routing) {
+    return refs;
+  }
+  for (const entry of routing.always_read) {
+    refs.add(entry);
+  }
+  for (const route of Object.values(routing.routes)) {
+    for (const target of route.read_order ?? []) {
+      refs.add(target);
+    }
+  }
+  return refs;
+}
+
 /**
- * Produces a reviewable proposal only. It never writes, moves, or deletes
- * vault content. Master, index, and already archived records are excluded.
+ * Selection contract: an ephemeral whose `expires` date has passed, or a cold
+ * document. Recency is the candidacy itself; the structural guardrails
+ * (gcGuardReason) decide whether a candidate may actually be archived.
+ */
+function candidateReason(record: CatalogRecord, now: Date): GcCandidateReason | undefined {
+  if (record.lifecycle === "ephemeral" && isExpired(record.expires, now)) {
+    return "expired_ephemeral";
+  }
+  if (record.tier === "cold") {
+    return "cold_unreferenced";
+  }
+  return undefined;
+}
+
+async function isFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function isGitRepo(root: string): Promise<boolean> {
+  try {
+    const result = await execFileAsync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"]);
+    return result.stdout.trim() === "true";
+  } catch {
+    return false;
+  }
+}
+
+async function updateArchiveIndex(
+  archiveYearDirectory: string,
+  year: string,
+  rootLabel: string,
+  stamp: string,
+  moved: ReadonlyArray<{ rel: string; reason: GcCandidateReason }>,
+): Promise<void> {
+  const indexPath = join(archiveYearDirectory, "_index.md");
+  const header = [
+    "---",
+    "lifecycle: master",
+    "---",
+    `# Archive ${year} (${rootLabel})`,
+    "",
+    "Files moved here by open-brain gc. Reversible with git or your version control.",
+    "",
+  ].join("\n") + "\n";
+  let existing: string;
+  try {
+    existing = await readFile(indexPath, "utf8");
+  } catch {
+    existing = header;
+  }
+  const additions = [...moved]
+    .sort((left, right) => left.rel.localeCompare(right.rel))
+    .map((entry) => `- [${stamp}] ${entry.rel}  (${entry.reason})`);
+  await writeAtomic(indexPath, existing.replace(/\n+$/u, "") + "\n" + additions.join("\n") + "\n");
+}
+
+/**
+ * Produces a reviewable proposal only. It never writes, moves, or deletes vault
+ * content. Candidacy (expired ephemeral or cold) is filtered through the full
+ * structural guardrails, so masters, index pages and zones, the preferences and
+ * archive zones, routing-referenced files, active-chantier docs, and any doc
+ * with an incoming link are excluded from both candidate reasons.
  */
 export function proposeGc(
   records: readonly CatalogRecord[],
@@ -86,40 +192,35 @@ export function proposeGc(
 ): GcProposal {
   const now = options.now ?? new Date();
   const incoming = new Set(options.graph?.edges.map((edge) => edge.target) ?? []);
-  const indexPrefix = pathPrefix(config.root_label, config.paths.index);
-  const archivePrefix = pathPrefix(config.root_label, config.paths.archive);
+  const routingRefs = routingRefsFromDocument(options.routing);
+  const active = activePathsFromConfig(config);
 
   const candidates = records
     .flatMap((record): GcCandidate[] => {
-      if (
-        record.lifecycle === "master" ||
-        record.path.startsWith(indexPrefix) ||
-        record.path.startsWith(archivePrefix)
-      ) {
+      const reason = candidateReason(record, now);
+      if (!reason) {
         return [];
       }
-
-      if (record.lifecycle === "ephemeral" && isExpired(record.expires, now)) {
-        return [{
-          path: record.path,
-          sha256: record.sha256,
-          lifecycle: record.lifecycle,
-          tier: record.tier,
-          reason: "expired_ephemeral",
-        }];
+      const rel = stripRootLabel(record.path, config.root_label);
+      const guard = gcGuardReason({
+        relativePath: rel,
+        lifecycle: record.lifecycle,
+        kind: record.kind,
+        hasIncoming: incoming.has(record.path),
+        active: isActive(rel, active.files, active.directories),
+        routingRefs,
+        config,
+      });
+      if (guard) {
+        return [];
       }
-
-      if (record.tier === "cold" && !incoming.has(record.path)) {
-        return [{
-          path: record.path,
-          sha256: record.sha256,
-          lifecycle: record.lifecycle,
-          tier: record.tier,
-          reason: "cold_unreferenced",
-        }];
-      }
-
-      return [];
+      return [{
+        path: record.path,
+        sha256: record.sha256,
+        lifecycle: record.lifecycle,
+        tier: record.tier,
+        reason,
+      }];
     })
     .sort((left, right) => left.path.localeCompare(right.path));
 
@@ -157,9 +258,12 @@ export function reviewGcProposal(
 }
 
 /**
- * Applies only an explicitly approved proposal. Applying records a durable,
- * non-destructive review report. It never deletes, moves, or overwrites vault
- * content, including candidates that are still unchanged.
+ * Applies an explicitly approved proposal by archiving each survivor under
+ * <archive>/<year>/<original path>, reversibly (git mv when the vault is a Git
+ * repository, otherwise a filesystem move) and never deleting anything. Every
+ * candidate is RE-VERIFIED at apply time (sha unchanged, still a candidate, all
+ * guardrails still clear), the archive folder index is updated, and a durable
+ * report with real counts is written. Parity with brain_gc apply.
  */
 export async function applyReviewedGcProposal(
   root: string,
@@ -173,36 +277,120 @@ export async function applyReviewedGcProposal(
     throw new Error("GC proposal must be explicitly reviewed and approved before apply.");
   }
 
-  const currentByPath = new Map(
-    currentRecords.map((record) => [record.path, record.sha256]),
+  const currentByPath = new Map(currentRecords.map((record) => [record.path, record]));
+  const routing = await loadRouting(root, config);
+  const routingRefs = routingRefsFromDocument(routing);
+  const active = activePathsFromConfig(config);
+  const incoming = new Set(
+    buildGraph([...currentRecords], config.root_label).edges.map((edge) => edge.target),
   );
-  const candidates = proposal.candidates.map((candidate) => {
-    const currentHash = currentByPath.get(candidate.path);
-    const current: GcApplyResult["candidates"][number]["current"] = currentHash === undefined
+  const year = String(now.getUTCFullYear());
+  const archiveYearRel = toPosixPath(join(config.paths.archive, year));
+  const stamp = now.toISOString().slice(0, 10);
+  const usesGit = await isGitRepo(root);
+
+  const candidates: GcAppliedCandidate[] = [];
+  const moved: Array<{ rel: string; reason: GcCandidateReason }> = [];
+  let archivedCount = 0;
+  let refusedGuardCount = 0;
+  let shaMismatchCount = 0;
+  let missingCount = 0;
+  let moveFailedCount = 0;
+
+  for (const candidate of proposal.candidates) {
+    const currentRecord = currentByPath.get(candidate.path);
+    const current: GcAppliedCandidate["current"] = currentRecord === undefined
       ? "missing"
-      : currentHash === candidate.sha256
+      : currentRecord.sha256 === candidate.sha256
         ? "unchanged"
         : "changed";
-    return { ...candidate, current };
-  });
-  const reportRelativePath = join(
-    config.paths.index,
-    "gc-proposals",
-    `${proposal.id}.applied.json`,
-  );
+
+    if (!currentRecord) {
+      missingCount += 1;
+      candidates.push({ ...candidate, current, outcome: "refused", detail: "missing_from_catalog" });
+      continue;
+    }
+    if (current === "changed") {
+      shaMismatchCount += 1;
+      candidates.push({ ...candidate, current, outcome: "refused", detail: "sha_mismatch" });
+      continue;
+    }
+
+    const rel = stripRootLabel(candidate.path, config.root_label);
+    const reason = candidateReason(currentRecord, now);
+    if (!reason) {
+      refusedGuardCount += 1;
+      candidates.push({ ...candidate, current, outcome: "refused", detail: "guard:not_a_candidate" });
+      continue;
+    }
+    const guard = gcGuardReason({
+      relativePath: rel,
+      lifecycle: currentRecord.lifecycle,
+      kind: currentRecord.kind,
+      hasIncoming: incoming.has(candidate.path),
+      active: isActive(rel, active.files, active.directories),
+      routingRefs,
+      config,
+    });
+    if (guard) {
+      refusedGuardCount += 1;
+      candidates.push({ ...candidate, current, outcome: "refused", detail: `guard:${guard}` });
+      continue;
+    }
+
+    const sourceAbsolute = join(root, rel);
+    if (!(await isFile(sourceAbsolute))) {
+      missingCount += 1;
+      candidates.push({ ...candidate, current, outcome: "refused", detail: "missing_on_disk" });
+      continue;
+    }
+
+    const destinationRel = toPosixPath(join(config.paths.archive, year, rel));
+    const destinationAbsolute = join(root, destinationRel);
+    try {
+      await mkdir(dirname(destinationAbsolute), { recursive: true });
+      if (usesGit) {
+        await execFileAsync("git", ["-C", root, "mv", rel, destinationRel]);
+      } else {
+        await rename(sourceAbsolute, destinationAbsolute);
+      }
+    } catch (error) {
+      moveFailedCount += 1;
+      const message = error instanceof Error ? error.message.slice(0, 120) : "unknown";
+      candidates.push({ ...candidate, current, outcome: "refused", detail: `move_failed:${message}` });
+      continue;
+    }
+    archivedCount += 1;
+    moved.push({ rel, reason });
+    candidates.push({
+      ...candidate,
+      current,
+      outcome: "archived",
+      detail: reason,
+      archived_to: `${config.root_label}/${destinationRel}`,
+    });
+  }
+
+  if (moved.length > 0) {
+    await updateArchiveIndex(join(root, archiveYearRel), year, config.root_label, stamp, moved);
+  }
+
+  const reportRelativePath = join(config.paths.index, "gc-proposals", `${proposal.id}.applied.json`);
   const result: GcApplyResult = {
     schema_version: GC_PROPOSAL_SCHEMA_VERSION,
     proposal_id: proposal.id,
     applied_at: now.toISOString(),
     review: { ...proposal.review },
     candidates,
-    deleted_count: 0,
+    archive_root: `${config.root_label}/${archiveYearRel}/`,
+    archived_count: archivedCount,
+    refused_guard_count: refusedGuardCount,
+    sha_mismatch_count: shaMismatchCount,
+    missing_count: missingCount,
+    move_failed_count: moveFailedCount,
     report_path: toPosixPath(reportRelativePath),
   };
 
-  await writeAtomic(
-    join(root, reportRelativePath),
-    `${JSON.stringify(result, null, 2)}\n`,
-  );
+  await writeAtomic(join(root, reportRelativePath), `${JSON.stringify(result, null, 2)}\n`);
   return result;
 }

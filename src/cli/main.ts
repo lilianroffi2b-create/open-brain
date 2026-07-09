@@ -15,11 +15,13 @@ import { buildGraph } from "../core/graph.js";
 import { checkVaultHealth } from "../core/health.js";
 import { ingestInbox } from "../core/ingest.js";
 import { writeIndexArtifacts } from "../core/index-writer.js";
-import { routeVault } from "../core/route.js";
+import { loadRouting, routeVault, suggestRoutes } from "../core/route.js";
 import { scanVault } from "../core/scan.js";
 import { applySkin, type SkinName } from "../core/skin.js";
 import { getVaultStatus } from "../core/status.js";
 import {
+  addPreference,
+  isLedgerDate,
   isPreferenceStatus,
   isPreferenceWeight,
   listPreferences,
@@ -28,6 +30,7 @@ import {
   PREFERENCE_CORE_RELATIVE_PATH,
   PREFERENCE_LEDGER_RELATIVE_PATH,
   savePreferenceLedger,
+  shouldAutoRegen,
   syncPreferenceMirrors,
   validatePreferenceLedger,
   writePreferenceCore,
@@ -35,11 +38,14 @@ import {
   type PreferenceWeight,
 } from "../prefs/index.js";
 import {
+  checkIdeaInVault,
+  dismissIdeaInVault,
   doctorVault,
   ENGINE_VERSION,
   getVaultFreeModeStatus,
   initVault,
   readJsonFile,
+  resetFreeModeState,
   resolveVaultRoot,
   setVaultFreeMode,
   updateVault,
@@ -113,6 +119,31 @@ function optionalPreferenceStatus(
     throw new Error(`--${name} must be a valid preference status.`);
   }
   return value;
+}
+
+function requiredPreferenceWeight(args: unknown, name: string): PreferenceWeight {
+  const weight = optionalPreferenceWeight(args, name);
+  if (weight === undefined) {
+    throw new Error(`--${name} requires an integer from 1 through 5.`);
+  }
+  return weight;
+}
+
+function optionalLedgerDate(args: unknown, name: string): string | undefined {
+  const value = optionalString(args, name);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isLedgerDate(value)) {
+    throw new Error(`--${name} must be an ISO date (YYYY-MM-DD).`);
+  }
+  return value;
+}
+
+// Tri-state boolean: --core => true, --no-core => false, absent => undefined.
+function optionalBoolean(args: unknown, name: string): boolean | undefined {
+  const value = argument(args, name);
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function requiredSkinName(args: unknown): SkinName {
@@ -281,18 +312,33 @@ const routeCommand = defineCommand({
   args: {
     query: {
       type: "positional",
-      description: "Natural-language request to route.",
-      required: true,
+      description: "Natural-language request to route. Optional with --suggest.",
+      required: false,
     },
     ...rootArgument,
+    suggest: {
+      type: "boolean",
+      description: "Propose new or mergeable routes from the catalog without editing routing.yml.",
+      default: false,
+    },
+    "min-docs": {
+      type: "string",
+      description: "Minimum cluster size to suggest a new route (with --suggest).",
+      required: false,
+    },
   },
   async run({ args }) {
-    const query = optionalString(args, "query");
-    if (!query) {
-      throw new Error("route requires a non-empty query.");
-    }
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const config = await loadConfig(root);
+    if (booleanArgument(args, "suggest")) {
+      const minDocs = optionalNonNegativeInteger(args, "min-docs") ?? 5;
+      printJson(await suggestRoutes(root, config, minDocs));
+      return;
+    }
+    const query = optionalString(args, "query");
+    if (!query) {
+      throw new Error("route requires a non-empty query unless --suggest is used.");
+    }
     printJson(await routeVault(root, config, query));
   },
 });
@@ -376,6 +422,7 @@ const gcCommand = defineCommand({
 
     const proposal = proposeGc(records, config, {
       graph: buildGraph(records, config.root_label),
+      routing: await loadRouting(root, config),
     });
     if (writePath !== undefined) {
       const path = resolve(writePath);
@@ -495,6 +542,46 @@ const prefsCommand = defineCommand({
         }
       },
     }),
+    add: defineCommand({
+      meta: {
+        name: "add",
+        description: "Create a new preference and seed the always-on core when it qualifies.",
+      },
+      args: {
+        ...rootArgument,
+        id: { type: "string", description: "Kebab-case preference identifier.", required: true },
+        text: { type: "string", description: "Preference statement text.", required: true },
+        weight: { type: "string", description: "Importance from 1 through 5.", required: true },
+        status: { type: "string", description: "Optional status (law, active, proposed, probation, retired).", required: false },
+        date: { type: "string", description: "Optional ISO date (YYYY-MM-DD). Defaults to today.", required: false },
+        core: { type: "boolean", description: "Force core membership regardless of weight.", required: false },
+      },
+      async run({ args }) {
+        const root = await resolveVaultRoot(optionalString(args, "root"));
+        const ledger = await loadPreferenceLedger(root);
+        const status = optionalPreferenceStatus(args, "status");
+        const date = optionalLedgerDate(args, "date");
+        const core = optionalBoolean(args, "core");
+        const id = requiredString(args, "id");
+        const next = addPreference(ledger, {
+          id,
+          text: requiredString(args, "text"),
+          weight: requiredPreferenceWeight(args, "weight"),
+          ...(status === undefined ? {} : { status }),
+          ...(date === undefined ? {} : { date }),
+          ...(core === undefined ? {} : { core }),
+        });
+        await savePreferenceLedger(root, next);
+        const preference = next.preferences.find((item) => item.id === id);
+        let regenerated = false;
+        if (preference && shouldAutoRegen(preference)) {
+          await writePreferenceCore(root, next);
+          await syncPreferenceMirrors(root, next);
+          regenerated = true;
+        }
+        printJson({ preference, regenerated });
+      },
+    }),
     list: defineCommand({
       meta: {
         name: "list",
@@ -579,6 +666,16 @@ const prefsCommand = defineCommand({
           description: "Optional replacement weight from 1 through 5.",
           required: false,
         },
+        status: {
+          type: "string",
+          description: "Optional replacement status.",
+          required: false,
+        },
+        date: {
+          type: "string",
+          description: "Optional ISO event date (YYYY-MM-DD).",
+          required: false,
+        },
         quote: {
           type: "string",
           description: "Optional supporting quote.",
@@ -591,16 +688,25 @@ const prefsCommand = defineCommand({
         const id = requiredString(args, "id");
         const signal = requiredString(args, "signal");
         const weight = optionalPreferenceWeight(args, "weight");
+        const status = optionalPreferenceStatus(args, "status");
+        const date = optionalLedgerDate(args, "date");
         const quote = optionalString(args, "quote");
         const next = logPreference(ledger, id, {
           signal,
           ...(weight === undefined ? {} : { weight }),
+          ...(status === undefined ? {} : { status }),
+          ...(date === undefined ? {} : { date }),
           ...(quote === undefined ? {} : { quote }),
         });
         await savePreferenceLedger(root, next);
-        printJson({
-          preference: next.preferences.find((preference) => preference.id === id),
-        });
+        const preference = next.preferences.find((item) => item.id === id);
+        let regenerated = false;
+        if (preference && shouldAutoRegen(preference)) {
+          await writePreferenceCore(root, next);
+          await syncPreferenceMirrors(root, next);
+          regenerated = true;
+        }
+        printJson({ preference, regenerated });
       },
     }),
   },
@@ -677,6 +783,46 @@ const freeModeCommand = defineCommand({
       args: rootArgument,
       async run({ args }) {
         printJson(await getVaultFreeModeStatus(optionalString(args, "root")));
+      },
+    }),
+    dismiss: defineCommand({
+      meta: {
+        name: "dismiss",
+        description: "Record an opaque fingerprint so an idea is never proposed again.",
+      },
+      args: {
+        idea: { type: "positional", description: "Short phrase describing the idea to dismiss.", required: true },
+        ...rootArgument,
+      },
+      async run({ args }) {
+        printJson(await dismissIdeaInVault(optionalString(args, "root"), requiredString(args, "idea")));
+      },
+    }),
+    check: defineCommand({
+      meta: {
+        name: "check",
+        description: "Check whether an idea was already dismissed. Exit code 1 means dismissed.",
+      },
+      args: {
+        idea: { type: "positional", description: "Short phrase describing the idea to check.", required: true },
+        ...rootArgument,
+      },
+      async run({ args }) {
+        const result = await checkIdeaInVault(optionalString(args, "root"), requiredString(args, "idea"));
+        printJson(result);
+        if (result.dismissed) {
+          process.exitCode = 1;
+        }
+      },
+    }),
+    reset: defineCommand({
+      meta: {
+        name: "reset",
+        description: "Erase every remembered dismissal by deleting local Free Mode state.",
+      },
+      args: rootArgument,
+      async run({ args }) {
+        printJson(await resetFreeModeState(optionalString(args, "root")));
       },
     }),
   },

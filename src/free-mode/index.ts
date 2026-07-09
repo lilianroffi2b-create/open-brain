@@ -18,25 +18,6 @@ export {
 } from "./prompts.js";
 
 export {
-  canShowFreeModeCheckpoint,
-  chooseAttentionPrompt,
-  createFreeModeRequestBudget,
-  markFreeModeCheckpointShown,
-  type AttentionCandidates,
-  type AttentionPrompt,
-  type FreeModeCheckpointOptions,
-  type FreeModeRequestBudget,
-} from "./attention.js";
-
-export {
-  OptionalIdeaSession,
-  evaluateOptionalIdea,
-  type OptionalIdeaCandidate,
-  type OptionalIdeaDecision,
-  type OptionalIdeaRejectionReason,
-} from "./ideas.js";
-
-export {
   FREE_MODE_STATE_RELATIVE_PATH,
   FREE_MODE_STATE_SCHEMA_VERSION,
   createFreeModeLocalState,

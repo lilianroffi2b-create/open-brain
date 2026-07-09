@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { catalogEnvelopeFromValue, readJson } from "./catalog.js";
 import { canonicalJson } from "./index-writer.js";
+import { countChangedSince } from "./scan.js";
 import { sha256 } from "./text.js";
 import type {
   CatalogIndexEnvelope,
@@ -196,7 +197,7 @@ export async function checkVaultHealth(
   let stale = !indexAvailable;
 
   if (!catalog) {
-    checks.push({ name: "catalog", severity: "error", detail: "Catalog is missing or invalid." });
+    checks.push({ name: "catalog", severity: "error", detail: "Catalog is missing or invalid. Run open-brain scan to build the index." });
   }
   if (!freshness) {
     checks.push({ name: "freshness", severity: "error", detail: "Freshness index is missing or invalid." });
@@ -213,6 +214,24 @@ export async function checkVaultHealth(
       checks.push({ name: "freshness", severity: "warning", detail: "Index freshness is stale." });
     } else {
       checks.push({ name: "freshness", severity: "ok", detail: "Index freshness is current." });
+    }
+
+    if (!Number.isNaN(generatedAt.getTime())) {
+      const changed = await countChangedSince(root, config, generatedAt);
+      if (changed > 0) {
+        stale = true;
+        checks.push({
+          name: "changes",
+          severity: "warning",
+          detail: `${changed} vault file(s) changed since the last scan.`,
+        });
+      } else {
+        checks.push({
+          name: "changes",
+          severity: "ok",
+          detail: "No vault files changed since the last scan.",
+        });
+      }
     }
 
     if (freshness.source_count !== catalog.records.length) {

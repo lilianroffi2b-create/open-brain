@@ -1,6 +1,0 @@
-# Publish every vault seed. The sibling .gitignore is copied into initialized
-# vaults and must keep its data-privacy rules there.
-!10_memory/
-!10_memory/preferences/
-!10_memory/preferences/_ledger.json
-!10_memory/preferences/_core.md

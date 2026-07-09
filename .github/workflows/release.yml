@@ -46,6 +46,9 @@ jobs:
       - name: Validate package allowlist
         run: npm run audit:package
 
+      - name: Verify tag matches package version
+        run: node -e "const v=require('./package.json').version; const t=process.env.GITHUB_REF_NAME.replace(/^v/,''); if(v!==t){console.error('Tag '+t+' does not match package.json version '+v); process.exit(1)}"
+
       # npm must trust this repository and workflow before publishing can succeed.
       - name: Publish package with provenance
         run: npm publish --provenance

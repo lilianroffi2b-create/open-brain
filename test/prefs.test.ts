@@ -6,13 +6,17 @@ import test from "node:test";
 
 import { DEFAULT_LOADER_FILENAMES } from "../src/loaders/index.js";
 import {
+  addPreference,
   createPreferenceLedger,
   derivePreferenceStatus,
+  effectiveCore,
+  getCorePreferences,
   listPreferences,
   logPreference,
   PREFERENCE_MIRROR_BEGIN_MARKER,
   PREFERENCE_MIRROR_END_MARKER,
   renderPreferenceCore,
+  shouldAutoRegen,
   syncPreferenceMirrorContent,
   syncPreferenceMirrors,
   validatePreferenceLedger,
@@ -122,6 +126,111 @@ test("Hermes lists deterministically and appends evidence without mutating histo
   assert.equal(derivePreferenceStatus(4), "active");
   assert.equal(derivePreferenceStatus(2), "proposed");
   assert.equal(derivePreferenceStatus(5, "retired"), "retired");
+});
+
+test("effective core follows the explicit flag, then falls back to weight", () => {
+  assert.equal(effectiveCore({ weight: 5 }), true);
+  assert.equal(effectiveCore({ weight: 4 }), true);
+  assert.equal(effectiveCore({ weight: 3 }), false);
+  assert.equal(effectiveCore({ core: true, weight: 1 }), true);
+  assert.equal(effectiveCore({ core: false, weight: 5 }), false);
+});
+
+test("shouldAutoRegen fires for core-effective or high-weight preferences", () => {
+  assert.equal(shouldAutoRegen({ weight: 4 }), true);
+  assert.equal(shouldAutoRegen({ weight: 3 }), false);
+  assert.equal(shouldAutoRegen({ core: true, weight: 2 }), true);
+  assert.equal(shouldAutoRegen({ core: false, weight: 5 }), true);
+  assert.equal(shouldAutoRegen({ core: false, weight: 3 }), false);
+});
+
+test("addPreference builds a valid preference from minimal input and rejects duplicates", () => {
+  const empty = createPreferenceLedger([]);
+  const withOne = addPreference(
+    empty,
+    { id: "concise-answers", text: "Answer briefly.", weight: 4 },
+    new Date("2026-07-09T00:00:00.000Z"),
+  );
+
+  assert.equal(validatePreferenceLedger(withOne).valid, true);
+  const added = withOne.preferences[0];
+  assert.ok(added);
+  assert.equal(added.id, "concise-answers");
+  assert.equal(added.statement, "Answer briefly.");
+  assert.equal(added.apply, "Answer briefly.");
+  assert.equal(added.status, "active");
+  assert.equal(added.origin, "2026-07-09");
+  assert.equal(added.last_seen, "2026-07-09");
+  assert.equal(added.core, undefined);
+  assert.equal(effectiveCore(added), true);
+  assert.deepEqual(added.evidence, []);
+
+  const withTwo = addPreference(withOne, {
+    id: "ask-first",
+    text: "Ask before destructive actions.",
+    weight: 5,
+    status: "law",
+    date: "2026-01-02",
+    core: true,
+  });
+  const second = withTwo.preferences[1];
+  assert.ok(second);
+  assert.equal(second.status, "law");
+  assert.equal(second.last_seen, "2026-01-02");
+  assert.equal(second.core, true);
+
+  assert.throws(
+    () => addPreference(withOne, { id: "concise-answers", text: "x", weight: 2 }),
+    /already exists/,
+  );
+  assert.throws(
+    () => addPreference(empty, { id: "Not Valid", text: "x", weight: 2 }),
+    /kebab-case/,
+  );
+});
+
+test("logging never overwrites an explicit core flag (parity F6)", () => {
+  const ledger = createPreferenceLedger([
+    preference("stays-false", { core: false, weight: 3 }),
+    preference("stays-true", { core: true, weight: 3 }),
+  ]);
+
+  const bumped = logPreference(ledger, "stays-false", {
+    signal: "reinforced",
+    weight: 5,
+  });
+  const staysFalse = bumped.preferences.find((item) => item.id === "stays-false");
+  assert.ok(staysFalse);
+  assert.equal(staysFalse.weight, 5);
+  assert.equal(staysFalse.status, "law");
+  assert.equal(staysFalse.core, false);
+  assert.equal(effectiveCore(staysFalse), false);
+  assert.equal(shouldAutoRegen(staysFalse), true);
+
+  const raised = logPreference(ledger, "stays-true", { signal: "reinforced", weight: 5 });
+  const staysTrue = raised.preferences.find((item) => item.id === "stays-true");
+  assert.ok(staysTrue);
+  assert.equal(staysTrue.core, true);
+});
+
+test("core defaults to weight when the flag is absent", () => {
+  const ledger = createPreferenceLedger([
+    {
+      id: "no-flag",
+      weight: 5,
+      status: "law",
+      domains: ["workflow"],
+      statement: "High weight, no explicit core.",
+      why: "Test preference.",
+      apply: "Apply it.",
+      origin: "2026-07-01",
+      last_seen: "2026-07-01",
+      evidence: [],
+    },
+  ]);
+
+  assert.equal(getCorePreferences(ledger).length, 1);
+  assert.equal(renderPreferenceCore(ledger).includes("no-flag"), true);
 });
 
 test("core rendering is deterministic and excludes retired or non-core preferences", () => {

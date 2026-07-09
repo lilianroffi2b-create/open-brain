@@ -18,6 +18,8 @@ It must not persist prompts, private reasoning, chain-of-thought, source content
 
 If onboarding is skipped, Free Mode defaults to `off`.
 
+This state lives at `.open-brain/local/free-mode-state.json` inside the vault. It contains only opaque SHA-256 fingerprints of dismissed ideas, never their raw text, and is excluded from Git by the vault's `.gitignore`. It can be cleared with `open-brain free-mode reset`.
+
 ## Your AI provider
 
 OpenBrain coordinates behavior through local files and loader instructions. Conversational AI is supplied by the CLI or provider you select. That provider may charge for usage or process content according to its own terms. Review those terms before opening sensitive files in an AI-enabled environment.

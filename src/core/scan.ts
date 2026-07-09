@@ -1,4 +1,4 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { extname, join, relative } from "node:path";
 
 import { excludedParts, palier, shardsEnabled } from "./config.js";
@@ -237,7 +237,21 @@ async function walkFiles(
   root: string,
   current: string,
   excluded: ReadonlySet<string>,
+  visited: Set<string> = new Set(),
 ): Promise<string[]> {
+  // Cycle guard: resolve the directory to its real path and never descend into
+  // the same real directory twice, so a symlink loop can never spin forever.
+  let currentReal: string;
+  try {
+    currentReal = await realpath(current);
+  } catch {
+    return [];
+  }
+  if (visited.has(currentReal)) {
+    return [];
+  }
+  visited.add(currentReal);
+
   const entries = await readdir(current, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
@@ -246,13 +260,59 @@ async function walkFiles(
     if (hasExcludedPart(relativeFilePath, excluded)) {
       continue;
     }
-    if (entry.isDirectory()) {
-      files.push(...await walkFiles(root, absolutePath, excluded));
-    } else if (entry.isFile()) {
+    let entryIsDirectory = entry.isDirectory();
+    let entryIsFile = entry.isFile();
+    if (entry.isSymbolicLink()) {
+      // Follow the link (stat resolves it). Broken links are simply skipped.
+      try {
+        const target = await stat(absolutePath);
+        entryIsDirectory = target.isDirectory();
+        entryIsFile = target.isFile();
+      } catch {
+        continue;
+      }
+    }
+    if (entryIsDirectory) {
+      files.push(...await walkFiles(root, absolutePath, excluded, visited));
+    } else if (entryIsFile) {
       files.push(absolutePath);
     }
   }
   return files;
+}
+
+/**
+ * Counts vault content files whose mtime is newer than the last scan. Generated
+ * index artifacts (aggregate catalog, graph, freshness, shards, deltas, and any
+ * JSON under the index directory) are ignored so only real human edits register.
+ * A positive count means the on-disk index has drifted and a rescan is due.
+ */
+export async function countChangedSince(
+  root: string,
+  config: VaultConfig,
+  since: Date,
+): Promise<number> {
+  const excluded = excludedParts(config);
+  const indexPrefix = toPosixPath(config.paths.index).replace(/\/$/u, "") + "/";
+  const sinceMs = since.getTime();
+  let changed = 0;
+  for (const absolutePath of await walkFiles(root, root, excluded)) {
+    const relativeFilePath = toPosixPath(relativePath(root, absolutePath));
+    if (isGeneratedPath(relativeFilePath, config)) {
+      continue;
+    }
+    if (relativeFilePath.startsWith(indexPrefix) && relativeFilePath.endsWith(".json")) {
+      continue;
+    }
+    try {
+      if ((await stat(absolutePath)).mtimeMs > sinceMs) {
+        changed += 1;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return changed;
 }
 
 async function shouldSkip(

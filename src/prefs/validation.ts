@@ -3,13 +3,38 @@ import {
   PREFERENCE_STATUSES,
   PREFERENCE_WEIGHTS,
   type LedgerValidationResult,
+  type Preference,
   type PreferenceLedger,
   type PreferenceStatus,
   type PreferenceWeight,
 } from "./types.js";
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const PREFERENCE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const PREFERENCE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Weight at or above which a preference is core unless overridden explicitly. */
+export const CORE_MIN_WEIGHT = 4;
+
+/**
+ * Effective core flag with parity to pref_ledger.py: an explicit `core` value
+ * wins, otherwise a preference is core when its weight reaches CORE_MIN_WEIGHT.
+ */
+export function effectiveCore(
+  preference: Pick<Preference, "core" | "weight">,
+): boolean {
+  return preference.core ?? preference.weight >= CORE_MIN_WEIGHT;
+}
+
+/**
+ * Whether a preference change should trigger regeneration of the always-on
+ * core and its loader mirrors. Parity with pref_ledger.py auto-regen: it is (or
+ * stays) core, or it is a high-weight change worth surfacing immediately.
+ */
+export function shouldAutoRegen(
+  preference: Pick<Preference, "core" | "weight">,
+): boolean {
+  return effectiveCore(preference) || preference.weight >= CORE_MIN_WEIGHT;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -104,8 +129,8 @@ function validatePreference(
     }
   }
 
-  if (typeof value.core !== "boolean") {
-    errors.push(`${label}.core must be boolean.`);
+  if (value.core !== undefined && typeof value.core !== "boolean") {
+    errors.push(`${label}.core must be boolean when present.`);
   }
 
   if (value.scoped !== undefined && typeof value.scoped !== "boolean") {
