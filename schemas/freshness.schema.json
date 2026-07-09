@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/freshness.schema.json",
+  "title": "OpenBrain Freshness Envelope",
+  "description": "Versioned scan freshness metadata emitted by the OpenBrain index writer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "root",
+    "source_count",
+    "palier",
+    "sharded",
+    "total_token_estimate",
+    "catalog_sha256",
+    "delta",
+    "scan_stats",
+    "lifecycle_counts",
+    "tier_counts"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "palier": {
+      "enum": [
+        "P1",
+        "P2",
+        "P3",
+        "P4"
+      ]
+    },
+    "sharded": {
+      "type": "boolean"
+    },
+    "total_token_estimate": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "catalog_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "added_count",
+        "modified_count",
+        "removed_count"
+      ],
+      "properties": {
+        "added_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modified_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "removed_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "scan_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "skipped"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "lifecycle_counts": {
+      "$ref": "#/$defs/counts"
+    },
+    "tier_counts": {
+      "$ref": "#/$defs/counts"
+    },
+    "shards": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shards_written",
+        "missing_recreated"
+      ],
+      "properties": {
+        "shards_written": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_recreated": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "delta_note": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  }
+}

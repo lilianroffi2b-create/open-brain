@@ -1,0 +1,13 @@
+version: 1
+root_label: FixtureBrain
+paliers:
+  p1_max: 2
+  p2_max: 4
+  p3_max: 8
+  shard_from: P1
+thermal:
+  hot_max_days: 14
+  warm_max_days: 90
+activity:
+  active_paths:
+    - 10_memory/alpha.md

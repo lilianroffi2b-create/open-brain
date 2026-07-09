@@ -1,0 +1,4 @@
+title = "OpenBrain secret scanning configuration"
+
+[extend]
+useDefault = true

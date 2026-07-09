@@ -1,0 +1,10 @@
+# OpenBrain local interaction state. It is never source material.
+.open-brain/local/
+
+# Personal vault data stays local by default. Track only the structure, engine,
+# integrations, and explicitly chosen public examples.
+01_inbox/
+10_memory/
+40_sources/
+50_outputs/
+90_archive/

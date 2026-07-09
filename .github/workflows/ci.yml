@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22.x, 24.x]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Run synthetic golden tests
+        run: npm run test:golden
+
+      - name: Validate package allowlist
+        run: npm run audit:package
+
+      - name: Inspect package contents
+        run: npm pack --dry-run
+
+      - name: Clean-install package smoke test
+        shell: bash
+        run: |
+          npm pack --json > pack.json
+          tarball="$(node -p "JSON.parse(require('node:fs').readFileSync('pack.json', 'utf8'))[0].filename")"
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          cp "$tarball" "$smoke_dir/"
+          (
+            cd "$smoke_dir"
+            npm init --yes >/dev/null
+            npm install --ignore-scripts --no-audit --no-fund "./$(basename "$tarball")"
+            npx --no-install open-brain --help
+            vault_dir="$smoke_dir/vault"
+            npx --no-install open-brain init "$vault_dir" --no-git
+            test -f "$vault_dir/.gitignore"
+            test -f "$vault_dir/10_memory/preferences/_core.md"
+            test -f "$vault_dir/10_memory/preferences/_ledger.json"
+          )
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository history and working tree
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

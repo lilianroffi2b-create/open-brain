@@ -1,0 +1,88 @@
+# OpenBrain vault configuration
+version: 1
+root_label: OpenBrain
+
+paths:
+  index: 00_index
+  deltas: 00_index/deltas
+  catalog: 00_index/catalog.json
+  catalog_shards: 00_index/catalog
+  catalog_index: 00_index/catalog/catalog_index.json
+  graph: 00_index/graph.json
+  freshness: 00_index/freshness.json
+  routing: 00_index/routing.yml
+  archive: 90_archive
+  inbox: 01_inbox
+  memory: 10_memory
+  contexts: 20_contexts
+  skills: 30_skills
+  sources: 40_sources
+  outputs: 50_outputs
+  engine: 70_engine
+
+exclusions:
+  - .git
+  - .DS_Store
+  - node_modules
+  - dist
+  - build
+  - coverage
+  - .open-brain
+  - 70_engine
+
+text_extensions:
+  - .md
+  - .txt
+  - .json
+  - .yaml
+  - .yml
+  - .toml
+  - .ts
+  - .tsx
+  - .js
+  - .jsx
+  - .css
+  - .html
+  - .sh
+  - .csv
+  - .tsv
+  - .env
+  - .example
+
+max_file_bytes: 768000
+
+paliers:
+  p1_max: 500
+  p2_max: 2000
+  p3_max: 10000
+  shard_from: P2
+
+deltas:
+  retention: 30
+
+thermal:
+  hot_max_days: 14
+  warm_max_days: 90
+
+ephemeral:
+  ttl_days: 30
+
+canonical_dirs:
+  - 00_index
+  - 01_inbox
+  - 10_memory
+  - 20_contexts
+  - 30_skills
+  - 40_sources
+  - 50_outputs
+  - 70_engine
+  - 90_archive
+
+activity:
+  active_paths: []
+  active_dir_prefixes: []
+
+interaction:
+  # Off is the safe default when onboarding is skipped.
+  # Accepted values: off | calibrated
+  free_mode: off

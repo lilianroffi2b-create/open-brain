@@ -1,0 +1,7 @@
+# Generic OpenBrain routing baseline.
+always_read:
+  - 10_memory/_state.md
+  - prompts/free-mode.md
+  - prompts/onboarding.md
+
+routes: {}

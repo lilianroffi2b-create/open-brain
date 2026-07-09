@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/catalog.schema.json",
+  "title": "OpenBrain Catalog Envelope",
+  "description": "Versioned catalog emitted by the OpenBrain scan engine.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "root_label",
+    "records"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "root_label": {
+      "type": "string",
+      "minLength": 1
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/catalog_record"
+      }
+    }
+  },
+  "$defs": {
+    "catalog_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "layer",
+        "domain",
+        "kind",
+        "lifecycle",
+        "tags",
+        "summary",
+        "headings",
+        "links",
+        "sha256",
+        "size",
+        "token_estimate",
+        "read_priority",
+        "source_state",
+        "tier"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "layer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lifecycle": {
+          "enum": [
+            "master",
+            "working",
+            "ephemeral",
+            "data"
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "summary": {
+          "type": "string"
+        },
+        "headings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "token_estimate": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "read_priority": {
+          "type": "integer"
+        },
+        "source_state": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "enum": [
+            "hot",
+            "warm",
+            "cold"
+          ]
+        },
+        "age_days": {
+          "type": "number",
+          "minimum": 0
+        },
+        "expires": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    }
+  }
+}

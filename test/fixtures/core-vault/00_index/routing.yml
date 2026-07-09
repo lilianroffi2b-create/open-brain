@@ -1,0 +1,17 @@
+always_read:
+  files:
+    - 10_memory/alpha.md
+routes:
+  default:
+    intent: General lookup
+    triggers:
+      - help
+    max_files: 2
+  planning:
+    intent: Find planning context
+    triggers:
+      - planning
+      - beta
+    read_order:
+      - 20_contexts/
+    max_files: 2

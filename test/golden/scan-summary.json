@@ -1,0 +1,29 @@
+{
+  "record_paths": [
+    "FixtureBrain/00_index/routing.yml",
+    "FixtureBrain/10_memory/alpha.md",
+    "FixtureBrain/10_memory/old-2020-01-01.md",
+    "FixtureBrain/20_contexts/beta.md",
+    "FixtureBrain/00_index/vault.config.yml",
+    "FixtureBrain/40_sources/source.txt"
+  ],
+  "edge_pairs": [
+    "FixtureBrain/10_memory/alpha.md->FixtureBrain/20_contexts/beta.md",
+    "FixtureBrain/10_memory/alpha.md->FixtureBrain/40_sources/source.txt"
+  ],
+  "lifecycle_counts": {
+    "data": 3,
+    "master": 1,
+    "working": 2
+  },
+  "tier_by_path": {
+    "FixtureBrain/10_memory/alpha.md": "hot",
+    "FixtureBrain/10_memory/old-2020-01-01.md": "cold",
+    "FixtureBrain/20_contexts/beta.md": "warm"
+  },
+  "delta": {
+    "added_count": 6,
+    "modified_count": 0,
+    "removed_count": 0
+  }
+}

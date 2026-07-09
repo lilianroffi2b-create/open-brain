@@ -1,0 +1,60 @@
+name: Free Mode feedback
+description: Help calibrate the optional proactive assistant behavior.
+title: "free mode: "
+labels: [free-mode, feedback]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Free Mode is proactive assistant behavior, not a bundled or free LLM. Do not paste prompts, transcripts, secrets, private vault content, or personal data.
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Free Mode setting
+      options:
+        - calibrated
+        - off
+        - I do not know
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feedback_type
+    attributes:
+      label: Feedback type
+      options:
+        - It interrupted too often
+        - It missed a material checkpoint
+        - It repeated an idea
+        - It offered a useful idea
+        - It did not respect Off mode
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: situation
+    attributes:
+      label: Sanitized situation
+      description: Describe the decision and outcome using a synthetic or redacted example.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected calibrated behavior
+      description: Explain whether a checkpoint, silence, disclosure, or one optional idea would have been better.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Acknowledgement
+      options:
+        - label: I understand that Free Mode does not provide an LLM or free AI usage.
+          required: true
+        - label: I removed prompts, private reasoning, secrets, personal data, and private vault content.
+          required: true
