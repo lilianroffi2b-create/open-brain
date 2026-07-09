@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmCommand = "npm";
 const packagePath = join(projectRoot, "package.json");
 const requiredFilesField = [
   "bin/",
@@ -36,6 +36,7 @@ function run(command, args, capture = false) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: projectRoot,
+      shell: process.platform === "win32",
       stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
     });
     let stdout = "";
