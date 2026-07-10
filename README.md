@@ -19,7 +19,7 @@ OpenBrain is not a hosted service, database, web application, or model provider.
 Requirements: Node.js 22.14.0 or later and Git when you want local version history.
 
 ```sh
-npx open-brain@latest init
+npx @lilian-rpm/open-brain@latest init
 open-brain scan
 ```
 
