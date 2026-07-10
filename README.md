@@ -20,7 +20,7 @@ Requirements: Node.js 22.14.0 or later and Git when you want local version histo
 
 ```sh
 npx @lilian-rpm/open-brain@latest init
-open-brain scan
+npx @lilian-rpm/open-brain scan
 ```
 
 `scan` builds the index; `status --auto` keeps it fresh afterward.

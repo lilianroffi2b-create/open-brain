@@ -51,7 +51,8 @@ jobs:
 
       # npm must trust this repository and workflow before publishing can succeed.
       - name: Publish package with provenance
-        run: npm publish --provenance
+        # --tag is required: npm refuses to publish a prerelease version without an explicit dist-tag.
+        run: npm publish --provenance --tag latest
 
       - name: Create GitHub Release
         env:
