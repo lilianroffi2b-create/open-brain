@@ -1,5 +1,9 @@
 # OpenBrain
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/lilianroffi2b-create/open-brain/main/assets/openbrain-hero.png" alt="OpenBrain: the brain is the folder" width="880">
+</p>
+
 [![CI](https://github.com/lilianroffi2b-create/open-brain/actions/workflows/ci.yml/badge.svg)](https://github.com/lilianroffi2b-create/open-brain/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
