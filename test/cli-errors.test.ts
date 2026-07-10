@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { before } from "node:test";
+import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const repoRoot = fileURLToPath(new URL("../", import.meta.url));
+// The gitignored bundle is built once by scripts/run-tests.mjs before the
+// parallel test processes start; building here would race other test files
+// that spawn the same bundle.
 const builtCli = fileURLToPath(new URL("../bin/cli.js", import.meta.url));
 
 async function pathExists(path: string): Promise<boolean> {
@@ -19,16 +21,6 @@ async function pathExists(path: string): Promise<boolean> {
     return false;
   }
 }
-
-// The built bundle is gitignored, so ensure it exists before spawning it. The
-// standard pipeline builds first; this keeps the test robust when it does not.
-before(() => {
-  execFileSync("npm", ["run", "build"], {
-    cwd: repoRoot,
-    stdio: "ignore",
-    shell: process.platform === "win32",
-  });
-});
 
 interface CliResult {
   stdout: string;
