@@ -20,6 +20,7 @@ import {
   findVaultRoot,
   loadConfig,
 } from "../core/config.js";
+import { ExpectedError } from "../core/errors.js";
 import {
   dismissIdea,
   getFreeModeStatePath,
@@ -36,7 +37,7 @@ import {
   syncLoadersFromConfig,
 } from "../loaders/index.js";
 
-export const ENGINE_VERSION = "0.1.0-alpha.1";
+export const ENGINE_VERSION = "0.1.0-alpha.2";
 export const OPENBRAIN_MANIFEST_FILENAME = ".open-brain.json";
 
 interface OpenBrainManifest extends Record<string, unknown> {
@@ -376,7 +377,7 @@ export async function resolveVaultRoot(start?: string): Promise<string> {
   const root = await findVaultRoot(requested);
   const configPath = await findVaultConfigPath(root);
   if (!configPath || dirname(dirname(configPath)) !== root) {
-    throw new Error(
+    throw new ExpectedError(
       `No OpenBrain vault was found from ${requested}. Run \`open-brain init\` first.`,
     );
   }
@@ -389,14 +390,14 @@ export async function initVault(
 ): Promise<InitVaultResult> {
   const root = resolve(target);
   if (await findVaultConfigPath(root)) {
-    throw new Error(
+    throw new ExpectedError(
       `An OpenBrain vault already exists at ${root}. Init never overwrites a vault; use update instead.`,
     );
   }
 
   const existingEntries = await readDirectoryEntries(root);
   if (existingEntries.length > 0) {
-    throw new Error(
+    throw new ExpectedError(
       `Refusing to initialize non-empty directory ${root}. Choose an empty directory to avoid overwriting files.`,
     );
   }

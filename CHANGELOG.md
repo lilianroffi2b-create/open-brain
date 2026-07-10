@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## Unreleased
 
+## 0.1.0-alpha.2 - 2026-07-10
+
+### Fixed
+
+- Stale shard artifacts are removed when a vault shrinks below the shard threshold, so scans self-heal instead of serving records for deleted files.
+- A corrupt or unreadable `vault.config.yml` is surfaced as a CLI warning and a health error instead of silently falling back to defaults.
+- Expected CLI errors print a single clean line to stderr without stack frames or a duplicated message.
+- Quickstart commands are pinned to the same version so the second command no longer resolves a different published spec.
+
+## 0.1.0-alpha.1 - 2026-07-10
+
 ### Added
 
 - Initial public release documentation and release controls.
@@ -20,7 +31,3 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Fixed
 
 - Delta note rotation.
-
-## Releases
-
-No version has been released yet.

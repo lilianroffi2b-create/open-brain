@@ -9,9 +9,11 @@ import {
   deepMerge,
   findVaultConfigPath,
   loadConfig,
+  loadConfigResult,
   palier,
   shardsEnabled,
 } from "../src/core/config.js";
+import { checkVaultHealth } from "../src/core/health.js";
 import {
   filenameDateTimestamp,
   isExpired,
@@ -57,4 +59,48 @@ test("configuration discovery supports a generic skin-specific index directory",
 
   assert.equal(await findVaultConfigPath(root), configPath);
   assert.equal((await loadConfig(root)).root_label, "SkinExample");
+});
+
+test("loadConfigResult stays silent when no config file exists", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "open-brain-config-missing-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const result = await loadConfigResult(root);
+  assert.equal(result.issue, undefined);
+  assert.equal(result.config.root_label, DEFAULT_CONFIG.root_label);
+});
+
+test("loadConfigResult reports invalid and non-mapping config instead of hiding it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "open-brain-config-bad-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const configPath = join(root, "00_index", "vault.config.yml");
+  await mkdir(join(root, "00_index"), { recursive: true });
+
+  await writeFile(configPath, "root_label: [unterminated\n", "utf8");
+  const parseFailure = await loadConfigResult(root);
+  assert.equal(parseFailure.issue?.reason, "parse-error");
+  assert.equal(parseFailure.issue?.path, configPath);
+  // Defaults are still returned so callers keep working.
+  assert.equal(parseFailure.config.root_label, DEFAULT_CONFIG.root_label);
+
+  await writeFile(configPath, "just a bare string\n", "utf8");
+  const nonMapping = await loadConfigResult(root);
+  assert.equal(nonMapping.issue?.reason, "not-a-mapping");
+});
+
+test("health fails when the config file exists but cannot be parsed", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "open-brain-config-health-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "00_index"), { recursive: true });
+  await writeFile(
+    join(root, "00_index", "vault.config.yml"),
+    "paths: [unterminated\n",
+    "utf8",
+  );
+
+  const config = await loadConfig(root);
+  const report = await checkVaultHealth(root, config);
+  const configCheck = report.checks.find((check) => check.name === "config");
+  assert.equal(configCheck?.severity, "error");
+  assert.equal(report.healthy, false);
 });

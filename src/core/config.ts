@@ -262,21 +262,83 @@ export async function findVaultRoot(start = process.cwd()): Promise<string> {
   return configPath ? dirname(dirname(configPath)) : resolve(start);
 }
 
-export async function loadConfig(root?: string): Promise<VaultConfig> {
+export type ConfigIssueReason = "read-error" | "parse-error" | "not-a-mapping";
+
+export interface ConfigLoadIssue {
+  path: string;
+  reason: ConfigIssueReason;
+  message: string;
+}
+
+export interface ConfigLoadResult {
+  config: VaultConfig;
+  issue?: ConfigLoadIssue;
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: unknown }).code === code
+  );
+}
+
+/**
+ * Loads the vault configuration and surfaces read or parse failures instead of
+ * hiding them. A missing config file is legitimate (defaults are used silently),
+ * but a config that exists yet cannot be read, parsed, or is not a YAML mapping
+ * yields an issue so callers can warn without losing the caller's own I/O purity.
+ */
+export async function loadConfigResult(root?: string): Promise<ConfigLoadResult> {
   const vaultRoot = root ? resolve(root) : await findVaultRoot();
   const configPath = await findConfigAtRoot(vaultRoot)
     ?? join(vaultRoot, VAULT_CONFIG_RELATIVE_PATH);
   let parsed: UnknownRecord = {};
+  let issue: ConfigLoadIssue | undefined;
+  let text: string | undefined;
 
   try {
-    const text = await readFile(configPath, "utf8");
-    const value = parseYaml(text);
-    parsed = isRecord(value) ? value : {};
-  } catch {
-    parsed = {};
+    text = await readFile(configPath, "utf8");
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) {
+      issue = {
+        path: configPath,
+        reason: "read-error",
+        message: `Vault config at ${configPath} could not be read; falling back to defaults.`,
+      };
+    }
   }
 
-  return normalizeConfig(deepMerge(DEFAULT_CONFIG, parsed));
+  if (text !== undefined) {
+    try {
+      const value = parseYaml(text) as unknown;
+      if (value === null || value === undefined) {
+        parsed = {};
+      } else if (isRecord(value)) {
+        parsed = value;
+      } else {
+        issue = {
+          path: configPath,
+          reason: "not-a-mapping",
+          message: `Vault config at ${configPath} is not a YAML mapping; falling back to defaults.`,
+        };
+      }
+    } catch {
+      issue = {
+        path: configPath,
+        reason: "parse-error",
+        message: `Vault config at ${configPath} is invalid YAML; falling back to defaults.`,
+      };
+    }
+  }
+
+  const config = normalizeConfig(deepMerge(DEFAULT_CONFIG, parsed));
+  return issue ? { config, issue } : { config };
+}
+
+export async function loadConfig(root?: string): Promise<VaultConfig> {
+  return (await loadConfigResult(root)).config;
 }
 
 export function excludedParts(config: VaultConfig): Set<string> {

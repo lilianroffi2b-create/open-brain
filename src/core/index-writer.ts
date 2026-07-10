@@ -101,6 +101,24 @@ async function previousShardNames(path: string): Promise<Set<string>> {
   return new Set(Object.keys(value.shards));
 }
 
+/**
+ * Removes the shard index and per-layer shard files left behind when a vault
+ * shrinks below the shard threshold. Only files named after the shards listed
+ * in the prior index (plus the index itself) are deleted, so the aggregate
+ * catalog, graph, and freshness artifacts are never touched.
+ */
+async function removeStaleShardArtifacts(
+  root: string,
+  config: VaultConfig,
+): Promise<void> {
+  const indexPath = join(root, config.paths.catalog_index);
+  const shardDirectory = join(root, config.paths.catalog_shards);
+  for (const name of await previousShardNames(indexPath)) {
+    await unlink(join(shardDirectory, name + ".json")).catch(() => undefined);
+  }
+  await unlink(indexPath).catch(() => undefined);
+}
+
 async function writeShards(
   root: string,
   config: VaultConfig,
@@ -199,6 +217,8 @@ export async function writeIndexArtifacts(
   if (scan.freshness.sharded) {
     const shards = await writeShards(root, config, scan.catalog, now);
     freshness = { ...freshness, shards };
+  } else {
+    await removeStaleShardArtifacts(root, config);
   }
 
   let deltaPath: string | undefined;

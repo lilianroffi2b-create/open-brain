@@ -49,8 +49,22 @@ jobs:
       - name: Verify tag matches package version
         run: node -e "const v=require('./package.json').version; const t=process.env.GITHUB_REF_NAME.replace(/^v/,''); if(v!==t){console.error('Tag '+t+' does not match package.json version '+v); process.exit(1)}"
 
+      # Re-pushing a tag for an already-published version must not fail the run.
+      - name: Check whether this version is already published
+        id: published
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          PUBLISHED="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
+          if [ "$PUBLISHED" = "$VERSION" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # npm must trust this repository and workflow before publishing can succeed.
       - name: Publish package with provenance
+        if: steps.published.outputs.exists == 'false'
         # --tag is required: npm refuses to publish a prerelease version without an explicit dist-tag.
         run: npm publish --provenance --tag latest
 

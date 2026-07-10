@@ -11,6 +11,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { ExpectedError } from "./errors.js";
 import type { VaultConfig } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -101,7 +102,7 @@ export interface SkinApplyResult {
   rescan_required: boolean;
 }
 
-export class SkinError extends Error {
+export class SkinError extends ExpectedError {
   public constructor(message: string) {
     super(message);
     this.name = "SkinError";

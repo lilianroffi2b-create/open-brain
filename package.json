@@ -1,6 +1,6 @@
 {
   "name": "@lilian-rpm/open-brain",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "A local, file-based continuity layer for AI CLI assistants.",
   "keywords": [
     "ai",

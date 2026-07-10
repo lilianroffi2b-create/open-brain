@@ -1,9 +1,10 @@
 import pc from "picocolors";
-import { defineCommand, runMain } from "citty";
+import { defineCommand, runCommand, runMain } from "citty";
 import { join, resolve } from "node:path";
 
 import { loadCatalog } from "../core/catalog.js";
-import { loadConfig } from "../core/config.js";
+import { loadConfigResult } from "../core/config.js";
+import { ExpectedError } from "../core/errors.js";
 import {
   applyReviewedGcProposal,
   GC_PROPOSAL_SCHEMA_VERSION,
@@ -19,6 +20,7 @@ import { loadRouting, routeVault, suggestRoutes } from "../core/route.js";
 import { scanVault } from "../core/scan.js";
 import { applySkin, type SkinName } from "../core/skin.js";
 import { getVaultStatus } from "../core/status.js";
+import type { VaultConfig } from "../core/types.js";
 import {
   addPreference,
   isLedgerDate,
@@ -102,7 +104,7 @@ function optionalPreferenceWeight(
   }
   const weight = Number(value);
   if (!Number.isInteger(weight) || !isPreferenceWeight(weight)) {
-    throw new Error(`--${name} must be an integer from 1 through 5.`);
+    throw new ExpectedError(`--${name} must be an integer from 1 through 5.`);
   }
   return weight;
 }
@@ -116,7 +118,7 @@ function optionalPreferenceStatus(
     return undefined;
   }
   if (!isPreferenceStatus(value)) {
-    throw new Error(`--${name} must be a valid preference status.`);
+    throw new ExpectedError(`--${name} must be a valid preference status.`);
   }
   return value;
 }
@@ -124,7 +126,7 @@ function optionalPreferenceStatus(
 function requiredPreferenceWeight(args: unknown, name: string): PreferenceWeight {
   const weight = optionalPreferenceWeight(args, name);
   if (weight === undefined) {
-    throw new Error(`--${name} requires an integer from 1 through 5.`);
+    throw new ExpectedError(`--${name} requires an integer from 1 through 5.`);
   }
   return weight;
 }
@@ -135,7 +137,7 @@ function optionalLedgerDate(args: unknown, name: string): string | undefined {
     return undefined;
   }
   if (!isLedgerDate(value)) {
-    throw new Error(`--${name} must be an ISO date (YYYY-MM-DD).`);
+    throw new ExpectedError(`--${name} must be an ISO date (YYYY-MM-DD).`);
   }
   return value;
 }
@@ -160,6 +162,16 @@ function printJson(value: unknown): void {
 
 function printNotice(message: string): void {
   process.stdout.write(`${pc.cyan(message)}\n`);
+}
+
+// Loads config for a command and warns once on stderr when the config file
+// exists but is unreadable or malformed, without changing the exit code.
+async function loadConfigForCli(root: string): Promise<VaultConfig> {
+  const { config, issue } = await loadConfigResult(root);
+  if (issue) {
+    process.stderr.write(`${pc.yellow("WARNING")} ${issue.message}\n`);
+  }
+  return config;
 }
 
 function isGcCandidate(value: unknown): boolean {
@@ -296,7 +308,7 @@ const scanCommand = defineCommand({
   args: rootArgument,
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
-    const config = await loadConfig(root);
+    const config = await loadConfigForCli(root);
     const previousRecords = await loadCatalog(root, config);
     const scan = await scanVault(root, config, { previousRecords });
     await writeIndexArtifacts(root, config, scan);
@@ -329,7 +341,7 @@ const routeCommand = defineCommand({
   },
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
-    const config = await loadConfig(root);
+    const config = await loadConfigForCli(root);
     if (booleanArgument(args, "suggest")) {
       const minDocs = optionalNonNegativeInteger(args, "min-docs") ?? 5;
       printJson(await suggestRoutes(root, config, minDocs));
@@ -337,7 +349,7 @@ const routeCommand = defineCommand({
     }
     const query = optionalString(args, "query");
     if (!query) {
-      throw new Error("route requires a non-empty query unless --suggest is used.");
+      throw new ExpectedError("route requires a non-empty query unless --suggest is used.");
     }
     printJson(await routeVault(root, config, query));
   },
@@ -351,7 +363,7 @@ const loaderSyncCommand = defineCommand({
   args: rootArgument,
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
-    const config = await loadConfig(root);
+    const config = await loadConfigForCli(root);
     printJson(await syncLoadersFromConfig(root, config));
   },
 });
@@ -392,19 +404,19 @@ const gcCommand = defineCommand({
     const requestedActions = [writePath, approvalPath, applyPath]
       .filter((value): value is string => value !== undefined);
     if (requestedActions.length > 1) {
-      throw new Error("Use only one of --write, --approve, or --apply per gc command.");
+      throw new ExpectedError("Use only one of --write, --approve, or --apply per gc command.");
     }
     if (reviewer !== undefined && approvalPath === undefined) {
-      throw new Error("--reviewer can only be used with --approve.");
+      throw new ExpectedError("--reviewer can only be used with --approve.");
     }
 
     const root = await resolveVaultRoot(optionalString(args, "root"));
-    const config = await loadConfig(root);
+    const config = await loadConfigForCli(root);
     const records = await loadCatalog(root, config);
 
     if (approvalPath !== undefined) {
       if (!reviewer) {
-        throw new Error("GC approval requires --reviewer with a non-empty value.");
+        throw new ExpectedError("GC approval requires --reviewer with a non-empty value.");
       }
       const path = resolve(approvalPath);
       const proposal = await readGcProposal(path);
@@ -442,7 +454,7 @@ const healthCommand = defineCommand({
   args: rootArgument,
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
-    const config = await loadConfig(root);
+    const config = await loadConfigForCli(root);
     const report = await checkVaultHealth(root, config);
     printJson(report);
     if (!report.healthy) {
@@ -471,7 +483,7 @@ const statusCommand = defineCommand({
   },
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
-    const config = await loadConfig(root);
+    const config = await loadConfigForCli(root);
     const report = await getVaultStatus(root, config, {
       auto: booleanArgument(args, "auto"),
       rescan: booleanArgument(args, "rescan"),
@@ -498,7 +510,7 @@ const ingestCommand = defineCommand({
   },
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
-    const config = await loadConfig(root);
+    const config = await loadConfigForCli(root);
     const batchId = optionalString(args, "batch-id");
     const report = await ingestInbox(root, config, {
       ...(batchId === undefined ? {} : { batchId }),
@@ -732,7 +744,7 @@ const skinCommand = defineCommand({
   },
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
-    const config = await loadConfig(root);
+    const config = await loadConfigForCli(root);
     const dryRun = booleanArgument(args, "dry-run");
     const result = await applySkin(root, config, requiredSkinName(args), {
       ...(dryRun ? { dryRun: true } : {}),
@@ -740,7 +752,7 @@ const skinCommand = defineCommand({
 
     let rescanned = false;
     if (!dryRun && result.rescan_required) {
-      const updatedConfig = await loadConfig(root);
+      const updatedConfig = await loadConfigForCli(root);
       const previousRecords = await loadCatalog(root, updatedConfig);
       const scan = await scanVault(root, updatedConfig, { previousRecords });
       await writeIndexArtifacts(root, updatedConfig, scan);
@@ -869,4 +881,55 @@ const main = defineCommand({
   },
 });
 
-await runMain(main);
+// citty raises a CLIError (name "CLIError") for user-facing usage problems
+// such as a missing required flag or an unknown command.
+function isCittyUsageError(error: unknown): boolean {
+  return error instanceof Error && error.name === "CLIError";
+}
+
+// A user who typed no command or an unknown command needs the full usage
+// block, not just an error line. Both failures are raised before any command
+// logic runs, so replaying them through citty is side-effect free.
+function needsUsageRendering(error: unknown): boolean {
+  if (!isCittyUsageError(error) || !("code" in (error as Error))) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === "E_NO_COMMAND" || code === "E_UNKNOWN_COMMAND";
+}
+
+function printExpectedError(message: string): void {
+  process.stderr.write(`${pc.red("ERROR")} ${message}\n`);
+}
+
+// Drives citty directly so expected errors print a single clean stderr line
+// with no stack frames and no duplicated message. Help, version, no-command,
+// and unknown-command keep citty's full usage rendering (citty prints usage
+// plus one message for its own CLIError, without a stack). Unexpected errors
+// keep their stack.
+async function runCli(rawArgs: string[]): Promise<void> {
+  const wantsHelp = rawArgs.includes("--help") || rawArgs.includes("-h");
+  const wantsVersion = rawArgs.length === 1 && rawArgs[0] === "--version";
+  if (wantsHelp || wantsVersion) {
+    await runMain(main, { rawArgs });
+    return;
+  }
+  try {
+    await runCommand(main, { rawArgs });
+  } catch (error) {
+    if (needsUsageRendering(error)) {
+      // Deterministic replay: citty renders usage, prints the message once,
+      // and exits with code 1.
+      await runMain(main, { rawArgs });
+      return;
+    }
+    if (error instanceof ExpectedError || isCittyUsageError(error)) {
+      printExpectedError(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
+}
+
+await runCli(process.argv.slice(2));

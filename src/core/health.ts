@@ -2,6 +2,7 @@ import { access, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { catalogEnvelopeFromValue, readJson } from "./catalog.js";
+import { loadConfigResult } from "./config.js";
 import { canonicalJson } from "./index-writer.js";
 import { countChangedSince } from "./scan.js";
 import { sha256 } from "./text.js";
@@ -178,6 +179,15 @@ export async function checkVaultHealth(
   const maxFreshnessAgeMs = options.maxFreshnessAgeMs ?? DEFAULT_MAX_FRESHNESS_AGE_MS;
   const checks: HealthCheck[] = [];
 
+  const configResult = await loadConfigResult(root);
+  if (configResult.issue) {
+    checks.push({
+      name: "config",
+      severity: "error",
+      detail: `${configResult.issue.message} Fix it, then run open-brain scan.`,
+    });
+  }
+
   for (const directory of config.canonical_dirs) {
     const present = await directoryExists(join(root, directory));
     checks.push({
@@ -252,9 +262,9 @@ export async function checkVaultHealth(
       const shardIndexPresent = await fileExists(shardIndexPath);
       checks.push({
         name: "shards",
-        severity: shardIndexPresent ? "warning" : "ok",
+        severity: shardIndexPresent ? "error" : "ok",
         detail: shardIndexPresent
-          ? "Shard index is present while sharding is disabled."
+          ? "Shard index is present while sharding is disabled. Run open-brain scan to repair the index."
           : "Sharding is disabled.",
       });
     }
