@@ -20,8 +20,8 @@ export interface ParityReference {
 export const PARITY_REFERENCE: ParityReference = {
   schema_version: 1,
   engine: "lrpm-brain-python",
-  snapshot: "2026-07-a",
-  date: "2026-07-26",
+  snapshot: "2026-07-b",
+  date: "2026-07-27",
   // Package version at the moment of the capture. It records when the snapshot
   // was taken, so it does not follow later releases.
   captured_by: "0.1.0-alpha.2",
@@ -34,12 +34,12 @@ export const PARITY_REFERENCE: ParityReference = {
     {
       name: "routing",
       area: "core",
-      note: "Smallest useful reading route for a request.",
+      note: "Smallest useful reading route for a request, a named folder served by its index first.",
     },
     {
       name: "preferences",
       area: "prefs",
-      note: "Weighted preference ledger and the always-on core it renders.",
+      note: "Weighted preference ledger, the always-on core it renders, and the cited door a stated preference enters by.",
     },
     {
       name: "lifecycle",

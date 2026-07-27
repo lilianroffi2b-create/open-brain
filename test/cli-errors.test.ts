@@ -134,7 +134,7 @@ test("twelve former stack traces: the seven fixable from this lot's perimeter ar
 
   // prefs add --id malformed
   const badId = await runBuiltCli(
-    ["prefs", "add", "--id", "Not Valid ID!", "--text", "x", "--weight", "3", "--root", root, "--unattended"],
+    ["prefs", "add", "--id", "Not Valid ID!", "--text", "x", "--weight", "3", "--quote", "Lilian said so.", "--root", root, "--unattended"],
     root,
   );
   assertCleanRefusal(badId, "prefs add with a malformed id");
@@ -142,12 +142,12 @@ test("twelve former stack traces: the seven fixable from this lot's perimeter ar
 
   // prefs add --id already existing
   const firstAdd = await runBuiltCli(
-    ["prefs", "add", "--id", "seed-pref", "--text", "Seed preference.", "--weight", "3", "--root", root, "--unattended"],
+    ["prefs", "add", "--id", "seed-pref", "--text", "Seed preference.", "--weight", "3", "--quote", "Lilian said so.", "--root", root, "--unattended"],
     root,
   );
   assert.equal(firstAdd.exitCode, 0, `seeding a preference should succeed; stderr: ${firstAdd.stderr}`);
   const dupeId = await runBuiltCli(
-    ["prefs", "add", "--id", "seed-pref", "--text", "y", "--weight", "3", "--root", root, "--unattended"],
+    ["prefs", "add", "--id", "seed-pref", "--text", "y", "--weight", "3", "--quote", "Lilian said so.", "--root", root, "--unattended"],
     root,
   );
   assertCleanRefusal(dupeId, "prefs add with a duplicate id");

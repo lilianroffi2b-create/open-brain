@@ -128,6 +128,18 @@ function optionalLedgerDate(args: unknown, name: string): string | undefined {
   return value;
 }
 
+function optionalDomainList(args: unknown, name: string): string[] | undefined {
+  const value = optionalString(args, name);
+  if (value === undefined) {
+    return undefined;
+  }
+  const domains = value.split(",").map((domain) => domain.trim()).filter((domain) => domain.length > 0);
+  if (domains.length === 0) {
+    throw new ExpectedError(`--${name} must list at least one non-empty domain.`);
+  }
+  return domains;
+}
+
 /**
  * The second door into the preference kernel.
  *
@@ -456,13 +468,16 @@ const gcCommand = defineCommand({
 const healthCommand = defineCommand({
   meta: {
     name: "health",
-    description: "Check vault structure, freshness, and index integrity.",
+    description: "Check vault structure, freshness, index integrity, and the reading path.",
   },
   args: rootArgument,
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const config = await loadConfigForCli(root);
-    const report = await checkVaultHealth(root, config);
+    // `health` is asked for on purpose, so it can afford to read every index
+    // and say whether documents can actually be arrived at. `status` runs on
+    // every session start and leaves that audit alone.
+    const report = await checkVaultHealth(root, config, { reachability: true });
     printJson(report);
     if (!report.healthy) {
       process.exitCode = 2;
@@ -561,6 +576,16 @@ const prefsCommand = defineCommand({
         }
       },
     }),
+    /**
+     * The direct door records what justified the preference, exactly like the
+     * gated one. `staging add` has always demanded a quote, and every batch that
+     * reaches the kernel through `sync validate` carries the proofs its
+     * candidates were staged with; only this door used to accept a preference
+     * that governs every turn with nothing behind it. A preference with no
+     * citation is not a preference, it is a guess that outranks one. Domains,
+     * why, and apply are optional here for the opposite reason: the library
+     * already derives honest defaults for them, and a default is not a claim.
+     */
     add: defineCommand({
       meta: {
         name: "add",
@@ -571,6 +596,11 @@ const prefsCommand = defineCommand({
         id: { type: "string", description: "Kebab-case preference identifier.", required: true },
         text: { type: "string", description: "Preference statement text.", required: true },
         weight: { type: "string", description: "Importance from 1 through 5.", required: true },
+        quote: { type: "string", description: "What was actually said, kept as the first evidence event.", required: true },
+        domains: { type: "string", description: "Comma-separated contexts the preference applies to. Defaults to general.", required: false },
+        why: { type: "string", description: "Why the preference exists. Defaults to the statement.", required: false },
+        apply: { type: "string", description: "How to carry it out. Defaults to the statement.", required: false },
+        source: { type: "string", description: "Where the preference came from.", required: false },
         status: { type: "string", description: "Optional status (law, active, proposed, probation, retired).", required: false },
         date: { type: "string", description: "Optional ISO date (YYYY-MM-DD). Defaults to today.", required: false },
         core: { type: "boolean", description: "Force core membership regardless of weight.", required: false },
@@ -585,6 +615,10 @@ const prefsCommand = defineCommand({
         const core = optionalBoolean(args, "core");
         const operationId = optionalString(args, "operation-id");
         const id = requiredString(args, "id");
+        const domains = optionalDomainList(args, "domains");
+        const why = optionalString(args, "why");
+        const apply = optionalString(args, "apply");
+        const source = optionalString(args, "source");
         const result = await runPreferenceOperation(
           root,
           {
@@ -592,6 +626,11 @@ const prefsCommand = defineCommand({
             id,
             text: requiredString(args, "text"),
             weight: requiredPreferenceWeight(args, "weight"),
+            quote: requiredString(args, "quote"),
+            ...(domains === undefined ? {} : { domains }),
+            ...(why === undefined ? {} : { why }),
+            ...(apply === undefined ? {} : { apply }),
+            ...(source === undefined ? {} : { source }),
             ...(status === undefined ? {} : { status }),
             ...(date === undefined ? {} : { date }),
             ...(core === undefined ? {} : { core }),

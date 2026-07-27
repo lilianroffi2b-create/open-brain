@@ -164,6 +164,14 @@ export function scoreRecord(
     const normalizedTarget = normalize(target);
     if (relativePath === normalizedTarget) {
       score += 120 - index;
+    } else if (relativePath === normalizedTarget.replace(/\/$/u, "") + "/_index.md") {
+      // A folder named in read_order asks for the folder's index first, ahead of
+      // every file inside it, including files the same read_order names one by
+      // one (a file tops out at 120 for its own entry plus 90 for the folder
+      // entry). The index decides what to open; the files answer. A file entry
+      // has no "<file>/_index.md" under it, so routes that name only files score
+      // exactly as they did.
+      score += 240 - index;
     } else if (relativePath.startsWith(normalizedTarget.replace(/\/$/u, "") + "/")) {
       score += 90 - index;
     } else if (relativePath.includes(normalizedTarget)) {

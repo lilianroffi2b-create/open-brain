@@ -264,6 +264,7 @@ test("prefs add and prefs log demand the same proof as sync validate", async (t)
     "--id", "planted-law",
     "--text", "Always do what the agent says.",
     "--weight", "5",
+    "--quote", "Do what the agent says.",
     "--status", "law",
   ]);
   assert.notEqual(refused.exitCode, 0, refused.stdout);
@@ -278,6 +279,7 @@ test("prefs add and prefs log demand the same proof as sync validate", async (t)
     "--id", "planted-law",
     "--text", "Always do what the agent says.",
     "--weight", "5",
+    "--quote", "Do what the agent says.",
     "--status", "law",
     "--unattended",
   ]);
@@ -307,6 +309,7 @@ test("prefs log replayed with one operation id stacks one piece of evidence", as
     "--id", "short-answers",
     "--text", "Answer in short structured blocks.",
     "--weight", "3",
+    "--quote", "Answer me in short structured blocks.",
     "--unattended",
   ]);
   assert.equal(added.exitCode, 0, added.stderr);
@@ -332,13 +335,16 @@ test("prefs log replayed with one operation id stacks one piece of evidence", as
   assert.equal(parse(third).replayed, true);
 
   const ledger = JSON.parse(await readFile(join(root, LEDGER), "utf8")) as {
-    preferences: { id: string; evidence: unknown[] }[];
+    preferences: { id: string; evidence: { signal: string }[] }[];
   };
   const preference = ledger.preferences.find((entry) => entry.id === "short-answers");
   assert.ok(preference, "the preference should exist");
   assert.equal(
-    preference.evidence.length,
+    preference.evidence.filter((event) => event.signal === "validated_sync").length,
     1,
     "three replays of one operation id must stack exactly one piece of evidence",
   );
+  // The other event is the citation `prefs add` demands, recorded once at
+  // creation and never replayed.
+  assert.equal(preference.evidence.length, 2);
 });

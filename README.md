@@ -49,8 +49,8 @@ Every command below accepts `--root <path>` to target a vault outside the curren
 | `doctor [--repair]` | Inspect vault directories, loaders, the redline record, and capability configuration; `--repair` fixes only safe generated wiring. |
 | `scan` | Scan the vault and write deterministic local index artifacts. |
 | `status [--auto] [--rescan]` | Show vault health, optionally rescanning stale indexes. |
-| `health` | Check vault structure, freshness, index integrity, and the preference kernel. |
-| `route [<query>] [--suggest] [--min-docs <n>]` | Return the smallest relevant reading route for a request, or propose new routes. |
+| `health` | Check vault structure, freshness, index integrity, the preference kernel, and whether documents can actually be reached. |
+| `route [<query>] [--suggest] [--min-docs <n>]` | Return the smallest relevant reading route for a request, or propose new routes. A folder named in `read_order` is served by its `_index.md` first. |
 | `ingest [--batch-id <id>]` | Import supported files from the configured inbox. |
 | `gc [--write <path> \| --approve <path> --reviewer <name> \| --apply <path>]` | Propose, approve, or apply safe cleanup. Never deletes outright. |
 | `skin <universal\|brain> [--dry-run]` | Apply a portable directory naming preset. |
@@ -65,10 +65,16 @@ demand the same proof of human presence as `sync validate`: standard input has
 to be a terminal, or the call has to say `--unattended` and accept the one
 guarantee that removes.
 
+`prefs add` also demands `--quote`, the thing that was actually said. Staging a
+candidate has always required a citation, and every batch that reaches the
+kernel through the gate carries the proofs its candidates were staged with. A
+preference read on every turn, entered with nothing behind it, is a guess that
+outranks the ones that had to prove themselves.
+
 | Command | What it does |
 |---|---|
 | `prefs validate` | Validate the preference ledger without changing it. |
-| `prefs add --id <id> --text <text> --weight <1-5> [--status <status>] [--date <date>] [--core] [--operation-id <id>] [--unattended]` | Create a preference; seeds the always-on core when it qualifies. |
+| `prefs add --id <id> --text <text> --weight <1-5> --quote <text> [--domains <a,b>] [--why <text>] [--apply <text>] [--source <text>] [--status <status>] [--date <date>] [--core] [--operation-id <id>] [--unattended]` | Create a preference; seeds the always-on core when it qualifies. The citation is required. |
 | `prefs list [--status <status>] [--domain <domain>] [--min-weight <1-5>] [--stale-days <n>]` | List preferences with deterministic filters. |
 | `prefs regen` | Regenerate the preference core and portable loader mirrors from the ledger already on disk. Cannot introduce a preference. |
 | `prefs log --id <id> --signal <signal> [--weight <1-5>] [--status <status>] [--date <date>] [--quote <text>] [--operation-id <id>] [--unattended]` | Append evidence to an existing preference. |
