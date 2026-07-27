@@ -51,6 +51,7 @@ import {
   type WeightWritePayload,
   type WritePayload,
 } from "../staging/types.js";
+import { newConfirmationToken } from "./presence.js";
 import { renderReview, renderStagedSlice, unifiedDiff } from "./render.js";
 import {
   DEFAULT_REVIEW_CHARS,
@@ -63,12 +64,14 @@ import {
   SIGNAL_VALIDATED,
   SIGNAL_VALIDATED_EVIDENCE,
   SYNC_LOCK_NAME,
+  SYNC_PRESENTATION_SCHEMA,
   SYNC_SCHEMA_VERSION,
   SyncGateError,
   type ActiveBatchView,
   type DerivedBatchPhase,
   type PendingReport,
   type PrepareResult,
+  type PresentationRecord,
   type ShowResult,
   type StagedCandidateView,
   type StagedSlice,
@@ -95,6 +98,7 @@ export interface BatchPaths {
   batch: string;
   state: string;
   decision: string;
+  presentation: string;
   undo: string;
   seal: string;
   undone: string;
@@ -116,6 +120,7 @@ export function batchPaths(root: string, config: VaultConfig, batchId: string): 
     batch: join(directory, `${batchId}.json`),
     state: join(directory, `${batchId}.state.json`),
     decision: join(directory, `${batchId}.decision.json`),
+    presentation: join(directory, `${batchId}.presented.json`),
     undo: join(directory, `${batchId}.undo.json`),
     seal: join(directory, `${batchId}.undo-seal.json`),
     undone: join(directory, `${batchId}.undone.json`),
@@ -565,6 +570,62 @@ export async function loadBatchDecision(
   return value === undefined ? undefined : parseBatchDecision(value, `${batchId}.decision.json`);
 }
 
+function parsePresentation(value: unknown, origin: string): PresentationRecord {
+  if (!isRecord(value) || value.schema !== SYNC_PRESENTATION_SCHEMA) {
+    throw new SyncGateError(`${origin} is not a ${SYNC_PRESENTATION_SCHEMA} document.`);
+  }
+  return {
+    schema: SYNC_PRESENTATION_SCHEMA,
+    schema_version: typeof value.schema_version === "number"
+      ? value.schema_version
+      : SYNC_SCHEMA_VERSION,
+    batch_id: requiredString(value.batch_id, "batch_id", origin),
+    presented_at: requiredString(value.presented_at, "presented_at", origin),
+    token: requiredString(value.token, "token", origin),
+  };
+}
+
+/** The proof that this batch was put in front of somebody, if it ever was. */
+export async function loadPresentation(
+  root: string,
+  config: VaultConfig,
+  batchId: string,
+): Promise<PresentationRecord | undefined> {
+  const paths = batchPaths(root, config, batchId);
+  const value = await readJsonFile(paths.presentation, `${batchId}.presented.json`);
+  return value === undefined ? undefined : parsePresentation(value, `${batchId}.presented.json`);
+}
+
+/**
+ * Records that a batch was presented, and hands out the token that proves it.
+ *
+ * The record is written once and reused afterwards, so showing the same batch
+ * twice prints the same token: a token that changed under the reader would only
+ * teach people to run the command again until it works. The file is re-read
+ * after the write so two concurrent presentations converge on the token that
+ * actually reached the disk rather than on the one each of them drew.
+ */
+async function recordPresentation(
+  root: string,
+  config: VaultConfig,
+  batchId: string,
+): Promise<PresentationRecord> {
+  const existing = await loadPresentation(root, config, batchId);
+  if (existing) {
+    return existing;
+  }
+  const paths = batchPaths(root, config, batchId);
+  const record: PresentationRecord = {
+    schema: SYNC_PRESENTATION_SCHEMA,
+    schema_version: SYNC_SCHEMA_VERSION,
+    batch_id: batchId,
+    presented_at: nowTimestamp(),
+    token: newConfirmationToken(),
+  };
+  await atomicWriteText(paths.presentation, `${JSON.stringify(record, null, 2)}\n`);
+  return await loadPresentation(root, config, batchId) ?? record;
+}
+
 export function sealState(state: BatchState): BatchState {
   const withoutHash = {
     schema: state.schema,
@@ -636,7 +697,7 @@ function nextForPhase(batchId: string, phase: DerivedBatchPhase, undone: boolean
   }
   switch (phase) {
     case "proposed":
-      return `Present it with \`open-brain sync show --batch ${batchId}\`, then decide with \`open-brain sync validate --batch ${batchId} --approve "<indices or empty>"\`.`;
+      return `Present it with \`open-brain sync show --batch ${batchId}\`, then decide with \`open-brain sync validate --batch ${batchId} --approve "<indices or empty>" --confirm <the token sync show prints>\`.`;
     case "needs_resume":
     case "decision_needs_resume":
     case "decided":
@@ -1405,7 +1466,7 @@ export async function prepareBatch(
       reject_only_indices: rejectOnly,
       approvable_indices: approvable,
       budget: presentation.budget,
-      next: `Present the batch with \`open-brain sync show --batch ${batch.batch_id}\`, then record your decision with \`open-brain sync validate --batch ${batch.batch_id} --approve "<indices you approve, or an empty string to reject everything>"\`. Nothing is written before that command runs.`,
+      next: `Present the batch with \`open-brain sync show --batch ${batch.batch_id}\`, then record your decision with \`open-brain sync validate --batch ${batch.batch_id} --approve "<indices you approve, or an empty string to reject everything>" --confirm <the token sync show prints>\`. Nothing is written before that command runs, and the gate refuses that command unless something proves a human is behind it.`,
     };
   });
 }
@@ -1435,6 +1496,12 @@ export interface ShowOptions {
   from?: number | undefined;
 }
 
+/**
+ * Presents a batch, and is the only place the confirmation token is ever
+ * printed. Showing is therefore no longer free of consequence: it is the step
+ * that records a human was given the chance to read this batch, which is what
+ * `sync validate` later demands proof of.
+ */
 export async function showBatch(
   root: string,
   config: VaultConfig,
@@ -1451,6 +1518,8 @@ export async function showBatch(
     command: `open-brain sync show --batch ${batchId}`,
   });
   const recorded = decision?.decision ?? state?.decision ?? null;
+  const presented = await recordPresentation(root, config, batchId);
+  const decide = `Decide with \`open-brain sync validate --batch ${batchId} --approve "<indices you approve, or an empty string to reject everything>" --confirm ${presented.token}\`. The token is printed here and nowhere else: retyping it is how the gate knows somebody read this batch.`;
 
   return {
     schema_version: SYNC_SCHEMA_VERSION,
@@ -1470,11 +1539,14 @@ export async function showBatch(
         rejected_indices: [...recorded.rejected_indices],
       },
     presentation: presentation.text,
+    confirmation_token: presented.token,
     budget: presentation.budget,
-    next: presentation.next ?? nextForPhase(
-      batchId,
-      phase,
-      (await readTextFile(batchPaths(root, config, batchId).undone)) !== undefined,
-    ),
+    next: phase === "proposed"
+      ? `${presentation.next === undefined ? "" : `${presentation.next} `}${decide}`
+      : presentation.next ?? nextForPhase(
+        batchId,
+        phase,
+        (await readTextFile(batchPaths(root, config, batchId).undone)) !== undefined,
+      ),
   };
 }

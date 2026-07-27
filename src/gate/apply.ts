@@ -29,6 +29,7 @@ import {
   type StagingBatch,
   type WeightWritePayload,
 } from "../staging/types.js";
+import { assertHumanPresence } from "./presence.js";
 import {
   batchPaths,
   derivePhase,
@@ -36,6 +37,7 @@ import {
   loadBatch,
   loadBatchDecision,
   loadBatchState,
+  loadPresentation,
   readTextFile,
   resolveMemoryTarget,
   saveBatchState,
@@ -47,6 +49,7 @@ import {
   SYNC_UNDO_SCHEMA,
   SYNC_UNDO_SEAL_SCHEMA,
   SyncGateError,
+  type DecisionProof,
   type ItemPreflight,
   type UndoRecord,
   type UndoSeal,
@@ -532,6 +535,53 @@ export interface ValidateInput {
   batchId: string;
   /** The literal value of --approve. An empty string rejects everything. */
   approve: string;
+  /** What proves this decision is a human decision. See gate/presence.ts. */
+  proof: DecisionProof;
+}
+
+/**
+ * Refuses to freeze a decision that nothing ties to a human.
+ *
+ * Two independent facts are required, and they answer two different questions.
+ * A terminal on standard input answers "is anybody there", which no composed
+ * command line can fabricate about itself. The token printed by `sync show`
+ * answers "did anybody read this batch", which item numbers never answered
+ * because they are guessable. The escape hatch removes the first and leaves the
+ * second: an agent driving the vault must still have presented the batch.
+ *
+ * This runs only when the decision file does not exist yet. Past that point the
+ * decision is frozen and replaying it is bookkeeping, not a new choice, which
+ * is why a resume never asks a human anything.
+ */
+async function assertDecisionProof(
+  root: string,
+  config: VaultConfig,
+  batch: StagingBatch,
+  proof: DecisionProof,
+): Promise<void> {
+  if (proof.kind === "replay") {
+    throw new SyncGateError(
+      `Batch ${batch.batch_id} carries no frozen decision, so there is nothing to replay. Present it with \`open-brain sync show --batch ${batch.batch_id}\` and decide it with \`open-brain sync validate\`.`,
+    );
+  }
+  assertHumanPresence(proof.presence, "`open-brain sync validate`");
+
+  const presented = await loadPresentation(root, config, batch.batch_id);
+  if (!presented) {
+    throw new SyncGateError(
+      `Batch ${batch.batch_id} was never presented, so nobody has read what it would write. Run \`open-brain sync show --batch ${batch.batch_id}\` first: it prints a short confirmation token to pass back with --confirm.`,
+    );
+  }
+  if (proof.confirm.trim().length === 0) {
+    throw new SyncGateError(
+      `This command needs --confirm <token>. \`open-brain sync show --batch ${batch.batch_id}\` prints the token, and retyping it is what proves the batch was read rather than guessed. It has no default, on purpose.`,
+    );
+  }
+  if (proof.confirm.trim().toLowerCase() !== presented.token) {
+    throw new SyncGateError(
+      `The confirmation token does not match the one \`open-brain sync show --batch ${batch.batch_id}\` printed. Nothing was applied. Present the batch again and retype the token it gives you.`,
+    );
+  }
 }
 
 /**
@@ -540,7 +590,8 @@ export interface ValidateInput {
  * Nothing before step 8 writes anything a later run has to undo, and nothing
  * after step 8 depends on the human being present again: the decision file is
  * the commit point of the review, and everything past it is replayable from
- * disk alone.
+ * disk alone. Step 4b is where the human is proven present, once, for the run
+ * that creates that commit point.
  */
 export async function validateApply(
   root: string,
@@ -583,6 +634,14 @@ export async function validateApply(
       throw new SyncGateError(
         `Batch ${batch.batch_id} was already decided differently (approved ${existingDecision.decision.approved_indices.join(", ") || "nothing"}). The frozen decision wins. Resume it with \`open-brain sync resume --batch ${batch.batch_id}\`.`,
       );
+    }
+
+    // 4b. Nothing below writes to a destination, but step 8 freezes a decision
+    // that everything after it replays. A decision that is about to exist for
+    // the first time is the exact moment, and the only moment, where a human
+    // has to be proven present.
+    if (!existingDecision) {
+      await assertDecisionProof(root, config, batch, input.proof);
     }
 
     const approvedItems = approved
@@ -885,13 +944,17 @@ export async function resumeBatch(
       phase,
       resumed: true,
       result: null,
-      next: `Batch ${batchId} was never decided, so there is nothing to replay. Present it with \`open-brain sync show --batch ${batchId}\` and decide with \`open-brain sync validate --batch ${batchId} --approve "<indices or empty>"\`.`,
+      next: `Batch ${batchId} was never decided, so there is nothing to replay. Present it with \`open-brain sync show --batch ${batchId}\` and decide with \`open-brain sync validate --batch ${batchId} --approve "<indices or empty>" --confirm <the token sync show prints>\`.`,
     };
   }
 
+  // The decision is already frozen, so this replays a choice a human already
+  // made and proved. It asks for nothing again, and if the frozen decision has
+  // gone missing from disk the gate refuses rather than invent one.
   const result = await validateApply(root, config, {
     batchId,
     approve: frozen.approved_indices.join(","),
+    proof: { kind: "replay" },
   });
   return {
     schema_version: SYNC_SCHEMA_VERSION,

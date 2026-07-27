@@ -3,6 +3,12 @@ import { defineCommand } from "citty";
 import { ExpectedError } from "../../core/errors.js";
 import { parseApprovedIndices, resumeBatch, validateApply } from "../../gate/apply.js";
 import {
+  humanPresenceFromStdin,
+  UNATTENDED_DESCRIPTION,
+  UNATTENDED_FLAG,
+  UNATTENDED_WARNING,
+} from "../../gate/presence.js";
+import {
   prepareBatchFromFile,
   showBatch,
   syncPending,
@@ -34,6 +40,13 @@ import { resolveVaultRoot } from "../vault.js";
  * The validation command deliberately has no default. `--approve` must be
  * typed, even to reject everything, because a copyable command that approves by
  * default is a command that will eventually write something nobody read.
+ *
+ * It also refuses to run without a proof that a human is there: a terminal on
+ * standard input, plus the token `sync show` prints. Neither can be produced by
+ * a caller composing commands into a script, which is the whole difference
+ * between a human decision and a claimed one. `--unattended` waives the first
+ * for people who drive their vault from an agent, says what it costs, and warns
+ * on stderr every time it is used.
  */
 
 function maxCharsArgument(args: unknown, name = "max-chars"): number | undefined {
@@ -207,16 +220,36 @@ const validateArguments = {
       "Comma separated item numbers you approve, or an empty string to reject everything. Required, never defaulted.",
     required: false,
   },
+  confirm: {
+    type: "string",
+    description:
+      "The short token `sync show` printed for this batch. Retyping it is what proves the batch was read.",
+    required: false,
+  },
+  unattended: {
+    type: "boolean",
+    description: UNATTENDED_DESCRIPTION,
+    default: false,
+  },
 } as const;
 
 async function runValidate(args: unknown): Promise<void> {
   const root = await resolveVaultRoot(optionalString(args, "root"));
   const config = await loadConfigForCli(root);
+  const unattended = booleanArgument(args, UNATTENDED_FLAG);
   const result = await validateApply(root, config, {
     batchId: requiredString(args, "batch"),
     approve: approveArgument(args),
+    proof: {
+      kind: "human",
+      confirm: optionalString(args, "confirm") ?? "",
+      presence: humanPresenceFromStdin(unattended),
+    },
   });
   printJson(result);
+  if (unattended) {
+    process.stderr.write(`${UNATTENDED_WARNING}\n`);
+  }
   for (const warning of result.warnings) {
     printNotice(warning);
   }
@@ -225,7 +258,8 @@ async function runValidate(args: unknown): Promise<void> {
 const validateCommand = defineCommand({
   meta: {
     name: "validate",
-    description: "Freeze your decision and apply exactly it. The only command that writes.",
+    description:
+      "Freeze your decision and apply exactly it. The only path from the staging area into the kernel, and it demands proof that a human is behind it.",
   },
   args: validateArguments,
   async run({ args }) {

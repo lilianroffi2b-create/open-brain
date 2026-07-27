@@ -19,6 +19,13 @@ import { runVaultScan } from "../core/scan.js";
 import { applySkin, type SkinName } from "../core/skin.js";
 import { getVaultStatus } from "../core/status.js";
 import {
+  assertHumanPresence,
+  humanPresenceFromStdin,
+  UNATTENDED_DESCRIPTION,
+  UNATTENDED_FLAG,
+  UNATTENDED_WARNING,
+} from "../gate/presence.js";
+import {
   isLedgerDate,
   isPreferenceStatus,
   isPreferenceWeight,
@@ -121,10 +128,48 @@ function optionalLedgerDate(args: unknown, name: string): string | undefined {
   return value;
 }
 
+/**
+ * The second door into the preference kernel.
+ *
+ * `prefs add` and `prefs log` write it directly, on purpose: a preference the
+ * user states by typing the whole statement themselves is a human decision, and
+ * routing it through a staging batch would be ceremony, not safety. What is not
+ * acceptable is that this door asks for less than `sync validate` does, because
+ * the weaker door is the one that defines the real guarantee. Both now demand
+ * the same thing: a terminal on standard input, or the documented flag that
+ * says out loud it is writing with no human present.
+ *
+ * There is no confirmation token here and there does not need to be. The token
+ * proves that somebody read a text the machine wrote; here the text is typed in
+ * the same command by the person the presence check is about.
+ */
+function assertPreferenceWriteIsHuman(args: unknown, command: string): boolean {
+  const unattended = booleanArgument(args, UNATTENDED_FLAG);
+  assertHumanPresence(humanPresenceFromStdin(unattended), `\`open-brain ${command}\``);
+  return unattended;
+}
+
+const unattendedArgument = {
+  unattended: {
+    type: "boolean",
+    description: UNATTENDED_DESCRIPTION,
+    default: false,
+  },
+} as const;
+
+const operationIdArgument = {
+  "operation-id": {
+    type: "string",
+    description:
+      "Idempotency key. Replaying the same operation id with the same payload changes nothing and reports the replay.",
+    required: false,
+  },
+} as const;
+
 function requiredSkinName(args: unknown): SkinName {
   const skin = requiredString(args, "skin");
   if (skin !== "universal" && skin !== "brain") {
-    throw new Error("skin must be either universal or brain.");
+    throw new ExpectedError("skin must be either universal or brain.");
   }
   return skin;
 }
@@ -170,7 +215,7 @@ function isGcProposal(value: unknown): value is GcProposal {
 async function readGcProposal(path: string): Promise<GcProposal> {
   const value = await readJsonFile(path);
   if (!isGcProposal(value)) {
-    throw new Error("GC proposal does not match the expected OpenBrain format.");
+    throw new ExpectedError("GC proposal does not match the expected OpenBrain format.");
   }
   return value;
 }
@@ -529,12 +574,16 @@ const prefsCommand = defineCommand({
         status: { type: "string", description: "Optional status (law, active, proposed, probation, retired).", required: false },
         date: { type: "string", description: "Optional ISO date (YYYY-MM-DD). Defaults to today.", required: false },
         core: { type: "boolean", description: "Force core membership regardless of weight.", required: false },
+        ...operationIdArgument,
+        ...unattendedArgument,
       },
       async run({ args }) {
+        const unattended = assertPreferenceWriteIsHuman(args, "prefs add");
         const root = await resolveVaultRoot(optionalString(args, "root"));
         const status = optionalPreferenceStatus(args, "status");
         const date = optionalLedgerDate(args, "date");
         const core = optionalBoolean(args, "core");
+        const operationId = optionalString(args, "operation-id");
         const id = requiredString(args, "id");
         const result = await runPreferenceOperation(
           root,
@@ -546,13 +595,21 @@ const prefsCommand = defineCommand({
             ...(status === undefined ? {} : { status }),
             ...(date === undefined ? {} : { date }),
             ...(core === undefined ? {} : { core }),
+            ...(operationId === undefined ? {} : { operationId }),
           },
           { command: "prefs add" },
         );
         if (result.outcome.kind === "conflict") {
           throw new ExpectedError(result.outcome.detail);
         }
-        printJson({ preference: result.preference, regenerated: result.regenerated });
+        printJson({
+          preference: result.preference,
+          regenerated: result.regenerated,
+          replayed: result.outcome.kind === "replayed",
+        });
+        if (unattended) {
+          process.stderr.write(`${UNATTENDED_WARNING}\n`);
+        }
       },
     }),
     list: defineCommand({
@@ -655,8 +712,11 @@ const prefsCommand = defineCommand({
           description: "Optional supporting quote.",
           required: false,
         },
+        ...operationIdArgument,
+        ...unattendedArgument,
       },
       async run({ args }) {
+        const unattended = assertPreferenceWriteIsHuman(args, "prefs log");
         const root = await resolveVaultRoot(optionalString(args, "root"));
         const id = requiredString(args, "id");
         const signal = requiredString(args, "signal");
@@ -664,6 +724,7 @@ const prefsCommand = defineCommand({
         const status = optionalPreferenceStatus(args, "status");
         const date = optionalLedgerDate(args, "date");
         const quote = optionalString(args, "quote");
+        const operationId = optionalString(args, "operation-id");
         const result = await runPreferenceOperation(
           root,
           {
@@ -674,13 +735,21 @@ const prefsCommand = defineCommand({
             ...(status === undefined ? {} : { status }),
             ...(date === undefined ? {} : { date }),
             ...(quote === undefined ? {} : { quote }),
+            ...(operationId === undefined ? {} : { operationId }),
           },
           { command: "prefs log" },
         );
         if (result.outcome.kind === "conflict") {
           throw new ExpectedError(result.outcome.detail);
         }
-        printJson({ preference: result.preference, regenerated: result.regenerated });
+        printJson({
+          preference: result.preference,
+          regenerated: result.regenerated,
+          replayed: result.outcome.kind === "replayed",
+        });
+        if (unattended) {
+          process.stderr.write(`${UNATTENDED_WARNING}\n`);
+        }
       },
     }),
   },

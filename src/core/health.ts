@@ -1,6 +1,8 @@
 import { access, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
+import { PREFERENCE_LEDGER_RELATIVE_PATH } from "../prefs/io.js";
+import { validatePreferenceLedger } from "../prefs/validation.js";
 import { catalogEnvelopeFromValue, readJson } from "./catalog.js";
 import { loadConfigResult } from "./config.js";
 import { canonicalJson } from "./index-writer.js";
@@ -169,6 +171,37 @@ async function checkShardIntegrity(
   return checks;
 }
 
+/**
+ * Checks that the preference kernel is a well-formed Hermes ledger. `health`
+ * is the command whose name promises the vault is sound, so it has to look at
+ * the kernel too: a corrupt registry that `health` calls healthy is a false
+ * promise, even though `doctor` and `prefs validate` already catch it.
+ */
+async function checkPreferenceKernel(root: string): Promise<HealthCheck> {
+  const path = join(root, PREFERENCE_LEDGER_RELATIVE_PATH);
+  const raw = await readJson(path);
+  if (raw === undefined) {
+    return {
+      name: "preferences",
+      severity: "error",
+      detail: "Preference ledger is missing or is not valid JSON. Run open-brain prefs validate for detail.",
+    };
+  }
+  const result = validatePreferenceLedger(raw);
+  if (!result.valid) {
+    return {
+      name: "preferences",
+      severity: "error",
+      detail: `Preference ledger is invalid: ${result.errors.join(" ")}`,
+    };
+  }
+  return {
+    name: "preferences",
+    severity: "ok",
+    detail: "Preference ledger is well formed.",
+  };
+}
+
 /** Checks vault structure, index freshness, and sharded catalog integrity. */
 export async function checkVaultHealth(
   root: string,
@@ -198,6 +231,8 @@ export async function checkVaultHealth(
         : "Missing canonical directory.",
     });
   }
+
+  checks.push(await checkPreferenceKernel(root));
 
   const catalogPath = join(root, config.paths.catalog);
   const freshnessPath = join(root, config.paths.freshness);

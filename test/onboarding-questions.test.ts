@@ -157,11 +157,11 @@ test("the classifier declares the money, the cap and where the cap is read", () 
   assert.match(statement, /classify --dry-run/u);
 });
 
-test("consolidation says it deletes, that it is alone in doing so, and how it arms", () => {
+test("consolidation says it trims a document, that it is alone in doing so, and how it arms", () => {
   const question = capabilityQuestion("learning.consolidate");
   assert.equal(question.requirement?.kind, "dedicated-confirmation");
   const statement = String(question.requirement?.statement);
-  assert.match(statement, /only capability in Open Brain that deletes/u);
+  assert.match(statement, /only capability in Open Brain that trims a document/u);
   assert.ok(statement.includes(CONSOLIDATE_CONFIRMATION_PHRASE));
   assert.match(statement, /No preset arms it/u);
   assert.match(statement, /--yes/u);

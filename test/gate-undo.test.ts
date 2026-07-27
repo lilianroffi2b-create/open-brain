@@ -10,8 +10,8 @@ import { DEFAULT_CONFIG } from "../src/core/config.js";
 import { sha256 } from "../src/core/text.js";
 import type { VaultConfig } from "../src/core/types.js";
 import { validateApply } from "../src/gate/apply.js";
-import { batchPaths, prepareBatch, syncStaged } from "../src/gate/review.js";
-import { SyncGateError } from "../src/gate/types.js";
+import { batchPaths, prepareBatch, showBatch, syncStaged } from "../src/gate/review.js";
+import { SyncGateError, type ValidateResult } from "../src/gate/types.js";
 import { undoBatch } from "../src/gate/undo.js";
 import { DEFAULT_LOADER_FILENAMES } from "../src/loaders/markers.js";
 import {
@@ -120,6 +120,24 @@ function items(weightId: string, memoryId: string): ClassificationItem[] {
   ]) as ClassificationItem[];
 }
 
+/** A decision with the proof a human leaves behind. See gate/presence.ts. */
+async function validateAsHuman(
+  root: string,
+  batchId: string,
+  approve: string,
+): Promise<ValidateResult> {
+  const shown = await showBatch(root, config, batchId);
+  return validateApply(root, config, {
+    batchId,
+    approve,
+    proof: {
+      kind: "human",
+      confirm: shown.confirmation_token,
+      presence: { interactive: true, unattended: false },
+    },
+  });
+}
+
 async function applyBoth(root: string): Promise<string> {
   const weightId = await stage(root, "existing-rule really matters");
   const memoryId = await stage(root, "Remember that the deploy target is staging.");
@@ -131,10 +149,7 @@ async function applyBoth(root: string): Promise<string> {
     items: items(weight, memory),
     selectionId: slice.selection_id,
   });
-  const result = await validateApply(root, config, {
-    batchId: prepared.batch_id,
-    approve: "1,2",
-  });
+  const result = await validateAsHuman(root, prepared.batch_id, "1,2");
   assert.equal(result.phase, "complete");
   assert.equal(result.undo_available, true);
   return prepared.batch_id;

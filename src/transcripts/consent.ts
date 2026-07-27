@@ -32,7 +32,7 @@ import type { VaultConfig } from "../core/types.js";
  */
 
 export const TRANSCRIPT_EXTENSION = ".jsonl";
-export const ENABLE_COMMAND = "open-brain capabilities enable transcripts --root <directory>";
+export const ENABLE_COMMAND = "open-brain capabilities enable transcripts --path <directory>";
 
 const MAX_WALK_DEPTH = 8;
 const MAX_WALK_ENTRIES = 20_000;

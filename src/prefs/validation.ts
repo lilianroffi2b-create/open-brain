@@ -1,3 +1,4 @@
+import { ExpectedError } from "../core/errors.js";
 import {
   PREFERENCE_LEDGER_SCHEMA_VERSION,
   PREFERENCE_STATUSES,
@@ -293,6 +294,6 @@ export function assertValidPreferenceLedger(
 ): asserts value is PreferenceLedger {
   const result = validatePreferenceLedger(value);
   if (!result.valid) {
-    throw new TypeError(`Invalid preference ledger: ${result.errors.join(" ")}`);
+    throw new ExpectedError(`Invalid preference ledger: ${result.errors.join(" ")}`);
   }
 }

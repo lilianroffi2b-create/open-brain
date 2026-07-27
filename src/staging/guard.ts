@@ -14,14 +14,23 @@ import type { VaultConfig } from "../core/types.js";
  *
  * The function is pure and synchronous. It performs no I/O at all, so it can run
  * inside a hook with a hard time budget and be exercised by tests without a
- * filesystem. The cost of that choice is that a symlink already pointing at a
- * protected file cannot be resolved here; that class is closed instead by
- * treating the whole preferences directory as protected and by counting both
- * operands of `ln` as write targets, so the alias can never be created either.
+ * filesystem.
+ *
+ * That choice has a cost, and this comment used to hide it. A path that is
+ * ALREADY a symbolic link to a protected file cannot be resolved here, so
+ * `printf x > alias.md` is judged on the alias and allowed. What the guard does
+ * close is the creation of the alias: both operands of `ln` count as write
+ * targets, and so do the link calls of the interpreters it can read, including
+ * the sync variants. What it cannot close is an alias that exists already, or
+ * one created by a program it cannot read. That class is caught after the fact
+ * rather than before: `doctor` reports every symlink resolving into the kernel,
+ * and the redline sees the modification. Prevention here is partial, and a
+ * comment claiming otherwise would be worse than the gap itself.
  *
  * When evidence is missing it refuses. An unparsable command, a payload that is
- * not an object, a nesting depth beyond four, a null byte, an unknown failure:
- * all of them deny.
+ * not an object, a nesting depth beyond four, a null byte, a command name built
+ * at runtime, a pipe into a shell, an interpreter body whose write target is
+ * hidden behind an encoding, an unknown failure: all of them deny.
  */
 
 export interface GuardInput {
@@ -124,12 +133,24 @@ const INTERPRETERS: readonly string[] = [
   "tsx",
 ];
 
+/**
+ * Names the preference CLI is known by. `cli.js` is on the list because it is
+ * the name that actually ships: `bin/cli.js` in the package, `70_engine/cli.js`
+ * in a vault. Recognizing only the pretty name recognized nothing.
+ *
+ * A name is never enough on its own, which is why recognizePreferenceCli also
+ * reads the subcommand tree. A binary can be renamed; `prefs add` cannot.
+ */
 const PREFERENCE_CLI_NAMES: readonly string[] = [
   "open-brain",
   "open-brain.js",
   "openbrain",
   "openbrain.js",
+  "cli.js",
 ];
+
+/** Operands that are a script or a package specifier, never a subcommand. */
+const SCRIPT_LIKE = /\.(?:js|mjs|cjs|ts|mts|cts)$/u;
 
 const PACKAGE_RUNNERS: readonly string[] = ["npx", "bunx", "pnpx", "yarn", "pnpm", "npm"];
 
@@ -143,8 +164,54 @@ const READ_ONLY_PREFERENCE_SUBCOMMANDS: readonly string[] = [
   "diff",
 ];
 
+/**
+ * Subcommand trees used to recognize the CLI when its file has been renamed,
+ * aliased, or wrapped in a shell function.
+ *
+ * These lists are deliberately closed, and they are used ONLY for recognition
+ * by content. A call that names the CLI is judged by the read-only list above,
+ * so an unknown `prefs` subcommand on the real binary still refuses. The cost
+ * of that split is stated plainly: `frobnicate prefs whatever` is not
+ * recognized. The alternative was to refuse `grep prefs README.md`, and a guard
+ * that refuses reads is the failure this file was rewritten to end.
+ */
+const PREFERENCE_SUBCOMMANDS: readonly string[] = [
+  ...READ_ONLY_PREFERENCE_SUBCOMMANDS,
+  "add",
+  "log",
+  "regen",
+];
+
+const SYNC_SUBCOMMANDS: readonly string[] = [
+  "pending",
+  "staged",
+  "prepare",
+  "show",
+  "resume",
+  "validate",
+  "apply",
+  "undo",
+];
+
+/**
+ * What counts as an intent to write inside an interpreter body.
+ *
+ * The link calls are on the list for the reason the header states: creating an
+ * alias to a protected file is a write, and refusing `ln -s` while allowing
+ * `os.symlink` refused the spelling rather than the act. `link\s*\(` covers
+ * `os.symlink(`, `os.link(`, `fs.link(` and the bare forms at once; the sync
+ * variants of Node do not contain it, so they are named.
+ */
 const WRITE_MARKERS =
-  /\.write_text\s*\(|\.write_bytes\s*\(|\.unlink\s*\(|\.rename\s*\(|\.replace\s*\(|\.touch\s*\(|\.mkdir\s*\(|os\.replace\s*\(|os\.remove\s*\(|os\.rmdir\s*\(|os\.truncate\s*\(|shutil\.(?:move|copy|copy2|copyfile|copytree|rmtree)\s*\(|open\s*\(|fopen\s*\(|writeFileSync|appendFileSync|writeFile\s*\(|appendFile\s*\(|createWriteStream|unlinkSync|renameSync|copyFileSync|rmSync|truncateSync|Deno\.writeTextFile|Deno\.writeFile|Deno\.remove|File\.write|IO\.write|FileUtils\./u;
+  /\.write_text\s*\(|\.write_bytes\s*\(|\.unlink\s*\(|\.rename\s*\(|\.replace\s*\(|\.touch\s*\(|\.mkdir\s*\(|\.symlink_to\s*\(|\.hardlink_to\s*\(|os\.replace\s*\(|os\.remove\s*\(|os\.rmdir\s*\(|os\.truncate\s*\(|shutil\.(?:move|copy|copy2|copyfile|copytree|rmtree)\s*\(|open\s*\(|fopen\s*\(|link\s*\(|symlinkSync|linkSync|writeFileSync|appendFileSync|writeFile\s*\(|appendFile\s*\(|createWriteStream|unlinkSync|renameSync|copyFileSync|rmSync|truncateSync|Deno\.writeTextFile|Deno\.writeFile|Deno\.remove|Deno\.symlink|File\.write|IO\.write|FileUtils\./u;
+
+/**
+ * Ways of naming a path without writing it down. A body that writes and hides
+ * its target behind one of these cannot be judged on its literals, so it is
+ * refused, exactly as an unresolved redirection target is.
+ */
+const OPAQUE_MARKERS =
+  /base64|b64decode|b64encode|atob\s*\(|btoa\s*\(|fromhex|unhexlify|fromCharCode|\.decode\s*\(\s*["']hex|codecs\.decode|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|chr\s*\(/u;
 
 const NULL_BYTE = "\u0000";
 const VAR_OPEN = "\uE000";
@@ -580,10 +647,12 @@ interface Segment {
   words: Token[];
   redirections: Redirection[];
   heredocs: string[];
+  /** This segment reads the standard output of the previous one. */
+  pipedInto: boolean;
 }
 
 function emptySegment(): Segment {
-  return { words: [], redirections: [], heredocs: [] };
+  return { words: [], redirections: [], heredocs: [], pipedInto: false };
 }
 
 function splitSegments(tokens: readonly Token[]): Segment[] {
@@ -605,6 +674,9 @@ function splitSegments(tokens: readonly Token[]): Segment[] {
     if (token.kind === "op") {
       if (SEGMENT_SEPARATORS.includes(token.value)) {
         close();
+        // Only a real pipe carries the previous output into this command. A
+        // logical or is a separator, not a channel.
+        current.pipedInto = token.value === "|";
         continue;
       }
       if (token.value === "<<" || token.value === "<<-") {
@@ -765,6 +837,7 @@ const GIT_TREE_SUBCOMMANDS: readonly string[] = ["clean", "apply", "am", "stash"
 interface Analysis {
   targets: WriteTarget[];
   preferenceCliMutation: boolean;
+  unattendedKernelWrite: boolean;
   mentionsProtectedName: boolean;
 }
 
@@ -1055,6 +1128,12 @@ function analyzeCode(context: Context, code: string, cwd: string): void {
   if (!WRITE_MARKERS.test(code)) {
     return;
   }
+  if (OPAQUE_MARKERS.test(code)) {
+    throw new GuardRefusal(
+      "opaque-interpreter-write",
+      "This interpreter body writes, and it builds at least one of its strings from an encoding, so the file it would touch cannot be established from the command. It is refused rather than guessed.",
+    );
+  }
   const literals = [...code.matchAll(/'([^'\n]*)'|"([^"\n]*)"/gu)]
     .map((match) => match[1] ?? match[2] ?? "")
     .filter((value) => value.length > 0);
@@ -1086,35 +1165,120 @@ function patchTargets(patch: string): string[] {
 }
 
 function analyzePreferenceCli(context: Context, words: readonly Word[]): void {
+  // The escape hatch of the human gate is a kernel write with the proof of a
+  // human switched off. A tool call is exactly the caller that must never have
+  // it: on a vault where the hooks capability is armed, that proof is the whole
+  // reason this guard runs at all.
+  if (words.some((word) => (word.expanded ?? word.value) === "--unattended")) {
+    context.analysis.unattendedKernelWrite = true;
+  }
+
   const operands = words.slice(1).filter((word) => !isFlag(word.value));
-  const prefsIndex = operands.findIndex((word) => word.value === "prefs" || word.value === "preferences");
+  const prefsIndex = operands.findIndex((word) => {
+    const value = word.expanded ?? word.value;
+    return value === "prefs" || value === "preferences";
+  });
   if (prefsIndex === -1) {
+    // A subcommand built at runtime could be any of them, including the ones
+    // that rewrite the ledger. An unresolved operand next to a subcommand that
+    // did resolve is just a flag value, so it proves nothing either way.
+    const namesGate = operands.some((word) => word.expanded === "sync");
+    if (!namesGate && operands.length > 0 && operands[0]?.expanded === undefined) {
+      throw new GuardRefusal(
+        "dynamic-preference-subcommand",
+        "This call runs the preference CLI with a subcommand built at runtime, so what it would do to the kernel cannot be established.",
+      );
+    }
     return;
   }
-  const subcommand = operands[prefsIndex + 1]?.value ?? "";
-  if (READ_ONLY_PREFERENCE_SUBCOMMANDS.includes(subcommand)) {
+  const next = operands[prefsIndex + 1];
+  if (next === undefined) {
+    // `prefs` with nothing after it prints its own help and writes nothing.
+    return;
+  }
+  if (next.expanded !== undefined && READ_ONLY_PREFERENCE_SUBCOMMANDS.includes(next.expanded)) {
     return;
   }
   context.analysis.preferenceCliMutation = true;
 }
 
-function isPreferenceCli(words: readonly Word[]): boolean {
+/** How this segment was recognized as the preference CLI, if it was. */
+type CliRecognition = "none" | "named" | "content";
+
+/**
+ * Recognizes the preference CLI by what it runs, not only by what it is called.
+ *
+ * The name check alone missed the binary that actually ships (`bin/cli.js`),
+ * the copy `init` writes into a vault (`70_engine/cli.js`), and every shell
+ * function or alias wrapping either of them. The subcommand tree is the part
+ * that cannot be renamed: `prefs add` means one thing and one program.
+ *
+ * The two ways of recognizing it are kept apart because they deserve different
+ * strictness. A call that names the CLI is this CLI, so anything but a read-only
+ * subcommand refuses. A call recognized only by its shape has to match a known
+ * tree, or every `grep prefs somefile` would refuse too.
+ */
+function recognizePreferenceCli(words: readonly Word[]): CliRecognition {
   const first = words[0];
   if (!first) {
-    return false;
+    return "none";
   }
   const name = basename(first.expanded ?? first.value).toLowerCase();
   if (PREFERENCE_CLI_NAMES.includes(name)) {
-    return true;
+    return "named";
   }
   if (PACKAGE_RUNNERS.includes(name) || INTERPRETERS.includes(name)) {
-    return words.slice(1).some((word) => {
+    const named = words.slice(1).some((word) => {
       const candidate = basename(word.expanded ?? word.value).toLowerCase();
       return PREFERENCE_CLI_NAMES.includes(candidate)
         || (word.value.toLowerCase().includes("open-brain") && candidate.endsWith(".js"));
     });
+    if (named) {
+      return "named";
+    }
   }
-  return false;
+  return looksLikePreferenceTree(words) ? "content" : "none";
+}
+
+/** `<anything> prefs add`, `<anything> sync validate`, and nothing looser. */
+function looksLikePreferenceTree(words: readonly Word[]): boolean {
+  const operands = subcommandOperands(words);
+  const head = operands[0];
+  const next = operands[1];
+  if (head === undefined || next === undefined) {
+    return false;
+  }
+  if (head === "prefs" || head === "preferences") {
+    return PREFERENCE_SUBCOMMANDS.includes(next);
+  }
+  return head === "sync" && SYNC_SUBCOMMANDS.includes(next);
+}
+
+/**
+ * The operands that can plausibly be subcommands: not flags, not script paths,
+ * not package specifiers, not directories. Flag values slip through, which is
+ * harmless: they only ever fail to match a known tree.
+ */
+function subcommandOperands(words: readonly Word[]): string[] {
+  const operands: string[] = [];
+  for (let index = 1; index < words.length; index += 1) {
+    const word = words[index];
+    if (!word || isFlag(word.value) || word.value === "--") {
+      continue;
+    }
+    const value = (word.expanded ?? word.value).toLowerCase();
+    if (
+      value.length === 0
+      || value === "."
+      || value === ".."
+      || value.includes("/")
+      || SCRIPT_LIKE.test(value)
+    ) {
+      continue;
+    }
+    operands.push(value);
+  }
+  return operands;
 }
 
 /** Skips assignments and wrappers to find what the segment actually runs. */
@@ -1172,6 +1336,23 @@ function resolveCommand(context: Context, words: readonly Word[]): Word[] {
   return remaining;
 }
 
+/**
+ * Whether this command, fed by a pipe, would execute what the pipe carries.
+ *
+ * A shell or an interpreter with no program of its own runs standard input.
+ * With `-c`, `-e`, or a script operand it runs that instead, and the pipe is
+ * just data: `cat notes | python3 report.py` stays readable, `cat program | sh`
+ * does not.
+ */
+function readsProgramFromStdin(name: string, words: readonly Word[]): boolean {
+  if (!SHELLS.includes(name) && !INTERPRETERS.includes(name)) {
+    return false;
+  }
+  return !words.slice(1).some(
+    (word) => word.value === "-c" || word.value === "-e" || !isFlag(word.value),
+  );
+}
+
 function analyzeSegment(context: Context, segment: Segment, cwd: string): string {
   const rawWords = toWords(segment, context.variables);
   analyzeRedirections(context, segment, cwd);
@@ -1190,12 +1371,23 @@ function analyzeSegment(context: Context, segment: Segment, cwd: string): string
   const name = basename(first.expanded ?? first.value).toLowerCase();
 
   // A command name that cannot be resolved cannot be checked against the
-  // mutator tables. On its own that proves nothing, but next to a protected
-  // path in the same command it is exactly the shape of a disguised writer.
-  if (first.expanded === undefined && context.analysis.mentionsProtectedName) {
+  // mutator tables at all, so nothing here can tell a listing from a deletion.
+  // This used to refuse only when a protected path was named in the same
+  // command, which let `$TOOL prefs add` and every renamed binary through.
+  if (first.expanded === undefined) {
     throw new GuardRefusal(
       "dynamic-command",
-      "The command name is built at runtime and the command names a protected file.",
+      "The command name is built at runtime, so what it runs cannot be established.",
+    );
+  }
+
+  // A command that reads its program from a pipe is a program this guard never
+  // sees. `printf "..." | bash` and `echo <base64> | base64 -d | sh` are the
+  // same call as the text they carry, and the text is not here to be read.
+  if (segment.pipedInto && readsProgramFromStdin(name, words)) {
+    throw new GuardRefusal(
+      "pipe-into-interpreter",
+      "This pipes into an interpreter, which runs a program this guard cannot read.",
     );
   }
 
@@ -1218,7 +1410,7 @@ function analyzeSegment(context: Context, segment: Segment, cwd: string): string
     return isAbsolute(destination) ? resolve(destination) : resolve(cwd, destination);
   }
 
-  if (isPreferenceCli(words)) {
+  if (recognizePreferenceCli(words) !== "none") {
     analyzePreferenceCli(context, words);
   }
 
@@ -1364,6 +1556,12 @@ function verdictFor(context: Context): GuardVerdict {
       "It calls a preference subcommand that mutates the ledger.",
     );
   }
+  if (context.analysis.unattendedKernelWrite) {
+    return deny(
+      "unattended-kernel-write",
+      "It runs the kernel gate with --unattended, which writes without proving a human approved it. A tool call is never that human. Run the command yourself in a terminal.",
+    );
+  }
   for (const target of context.analysis.targets) {
     const classified = classifyTarget(target, context.guarded);
     if (classified === "protected") {
@@ -1406,7 +1604,12 @@ function evaluate(input: GuardInput): GuardVerdict {
   const context: Context = {
     guarded: protectedPathsFor(input),
     variables: new Map<string, string>(),
-    analysis: { targets: [], preferenceCliMutation: false, mentionsProtectedName: false },
+    analysis: {
+      targets: [],
+      preferenceCliMutation: false,
+      unattendedKernelWrite: false,
+      mentionsProtectedName: false,
+    },
     depth: 0,
   };
   const cwd = effectiveCwd(input);

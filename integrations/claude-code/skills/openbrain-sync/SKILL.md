@@ -90,6 +90,10 @@ The presentation is capped and reports its cost. When it says it truncated,
 read the rest with `--from <n>` before deciding. An item nobody read is still an
 item being rejected.
 
+The response also carries a `confirmation_token`: keep it. `sync validate`
+needs it back, unchanged, to prove this exact batch was actually shown before
+anything was approved.
+
 Use AskUserQuestion in multi-selection mode, four items maximum per question. A
 checked option is approved. **Any unchecked option is rejected.** There is no
 abstention. With more than four items, collect the answers over several
@@ -99,11 +103,20 @@ explicit human decision on the batch.
 ## 5. One single apply
 
 Validate the indices locally: positive integers, unique, within range. Then run
-exactly one command, with the batch id and the indices as separate arguments:
+exactly one command, with the batch id, the indices, and the token from step 4
+as separate arguments:
 
 ```
-open-brain sync validate --batch <batch_id> --approve "<indices you approve>"
+open-brain sync validate --batch <batch_id> --approve "<indices you approve>" --confirm <confirmation_token> --unattended
 ```
+
+`--confirm` must be exactly the `confirmation_token` `sync show` returned for
+this batch in step 4; retyping it is what proves the batch was read rather than
+approved sight unseen. `--unattended` is required here because this command
+runs from an agent's shell, which has no terminal on standard input to prove a
+human is present; it waives only that one guarantee, never the token, and the
+CLI prints a warning on stderr every time it is used. Do not add `--unattended`
+to any command this skill does not explicitly show it on.
 
 To reject everything, pass an empty string to `--approve`. The flag has no
 default and must always be typed. The gate rechecks every precondition before

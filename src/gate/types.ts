@@ -6,6 +6,7 @@ import type {
   CandidateStatus,
   StagingBatch,
 } from "../staging/types.js";
+import type { HumanPresence } from "./presence.js";
 
 /**
  * The shapes of the human gate: the one door through which anything reaches the
@@ -21,6 +22,7 @@ import type {
 export const SYNC_UNDO_SCHEMA = "open-brain/sync-undo/v1";
 export const SYNC_UNDO_SEAL_SCHEMA = "open-brain/sync-undo-seal/v1";
 export const SYNC_UNDONE_SCHEMA = "open-brain/sync-undone/v1";
+export const SYNC_PRESENTATION_SCHEMA = "open-brain/sync-presentation/v1";
 export const SYNC_SCHEMA_VERSION = 1;
 
 /** Named lock guarding prepare and validate. Distinct from the store lock. */
@@ -73,6 +75,33 @@ export class EmptyStagingError extends SyncGateError {
     this.name = "EmptyStagingError";
   }
 }
+
+/**
+ * The trace that a batch was actually put in front of somebody, and the token
+ * that trace hands out. Written by `sync show`, read by `sync validate`.
+ *
+ * It is what turns "the caller typed an item number" into "the caller read the
+ * presentation": the numbers are guessable, the token is not.
+ */
+export interface PresentationRecord {
+  schema: typeof SYNC_PRESENTATION_SCHEMA;
+  schema_version: number;
+  batch_id: string;
+  presented_at: string;
+  token: string;
+}
+
+/**
+ * What a caller offers as proof that this decision is a human decision.
+ *
+ * A replay carries no proof at all, and it does not need one: it is only ever
+ * accepted when the decision is already frozen on disk, which means the proof
+ * was given the first time. Everything that freezes a new decision must be of
+ * kind human.
+ */
+export type DecisionProof =
+  | { kind: "human"; confirm: string; presence: HumanPresence }
+  | { kind: "replay" };
 
 /**
  * Phases a batch can be in from the outside, including the two that exist only
@@ -158,6 +187,8 @@ export interface ShowResult {
   approvable_indices: number[];
   decision: { approved_indices: number[]; rejected_indices: number[] } | null;
   presentation: string;
+  /** Retyped into `sync validate --confirm`. Printed here and nowhere else. */
+  confirmation_token: string;
   budget: ContextBudget;
   next: string;
 }

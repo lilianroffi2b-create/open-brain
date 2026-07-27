@@ -18,11 +18,11 @@ Record the answers in `10_memory/_state.md` under a short "Who" note. Do not inv
 
 Goal: capture how the user wants the assistant to work, and seed it as durable, weighted preferences.
 
-Ask a few concrete questions: preferred answer length and format, tone, when to ask before acting, and any hard rules. For each clear preference the user states, add it to the ledger with `open-brain prefs add`. Examples:
+Ask a few concrete questions: preferred answer length and format, tone, when to ask before acting, and any hard rules. For each clear preference the user states, add it to the ledger with `open-brain prefs add`. This write demands proof a human is present: run it yourself in a terminal, or, since you are the assistant running this command on the user's behalf, add `--unattended`, which declares honestly that an agent typed it, not the user, rather than working around any check. Examples:
 
-    open-brain prefs add --id concise-answers --text "Answer briefly, structured, no filler." --weight 4
-    open-brain prefs add --id ask-before-destructive --text "Ask before any destructive or external action." --weight 5 --status law
-    open-brain prefs add --id plan-before-build --text "Present a short plan and wait for yes before building." --weight 3
+    open-brain prefs add --id concise-answers --text "Answer briefly, structured, no filler." --weight 4 --unattended
+    open-brain prefs add --id ask-before-destructive --text "Ask before any destructive or external action." --weight 5 --status law --unattended
+    open-brain prefs add --id plan-before-build --text "Present a short plan and wait for yes before building." --weight 3 --unattended
 
 Weight runs 1 through 5 and sets importance; weight 4 and 5 preferences become always-on core. Pass `--core` to force a lower-weight preference into the core, or `--status` to set law, active, proposed, probation, or retired. When a preference lands in the core, the assistant regenerates `10_memory/preferences/_core.md` and the loader mirrors automatically.
 

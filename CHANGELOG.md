@@ -6,9 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## Unreleased
 
-## 0.1.0-alpha.3 - 2026-07-27
-
-Nothing added in this release is armed by default. A vault created with `init` still ships with all seven capabilities disarmed; every item below is something you can turn on, not something that started running.
+Nothing added below is armed by default. A vault created with `init` still ships with all seven capabilities disarmed; every item below is something you can turn on, not something that started running.
 
 ### Added
 
@@ -19,7 +17,7 @@ Nothing added in this release is armed by default. A vault created with `init` s
 - `open-brain capture scan|mine|markers`: deterministic, local extraction of preference and memory candidates from a transcript or from whatever a hook already saw, behind a documented marker pre-filter.
 - `open-brain transcripts scan|show|purge`: reads session transcripts only from directories named through `capabilities enable transcripts --path`, consent per path and never global, with redaction on by default and a documented list of what it covers and what it does not.
 - `open-brain classify [--dry-run]`: sends staged candidates to a model for typing and scoring, capped by a daily call budget, and prices a run before it can ever spend one. The only capability that spends money or sends anything off the machine.
-- `open-brain staging list|show|add|drop|compact|status` and `open-brain sync pending|staged|prepare|show|resume|validate|apply|undo`: the human gate between anything staged and the preference kernel. `sync validate` (alias `sync apply`) is the only command that writes to the kernel. `sync undo` reverses an applied batch from a record written before the batch and sealed after it, not from git; it works on a vault that is not a git repository at all.
+- `open-brain staging list|show|add|drop|compact|status` and `open-brain sync pending|staged|prepare|show|resume|validate|apply|undo`: the human gate between anything staged and the preference kernel. `sync validate` (alias `sync apply`) is the only path from that gate into the kernel; `prefs add` is a second, deliberate door, for a preference you state yourself, and both demand the same proof that a human is present. `sync undo` reverses an applied batch from a record written before the batch and sealed after it, not from git; it works on a vault that is not a git repository at all.
 - `open-brain learn status|mirror|journal|sensors|evaluate|beliefs|rollback|consolidate`: a decision journal, sensors, an evaluator, and a belief store, gated behind `learning`, `learning.evaluate`, and `learning.consolidate`. Four organs the layer would need to act on its own (an inferrer, a metabolism, a voice, and generalized consolidation) are not built, and three evaluation rules are measured but disarmed by contract, never moving a confidence. `open-brain learn mirror` names all of this itself, every time it runs.
 - `PARITY.md`: a frozen, dated reference to the private engine this project owes a capability debt to, so a comparison against it stays a finite, answerable question instead of a moving target.
 - Per-host integration references documenting exactly what gets written to `.claude/settings.json` and `.codex/hooks.json`, the merge rules that protect entries OpenBrain does not own, and where Claude Code and Codex differ.

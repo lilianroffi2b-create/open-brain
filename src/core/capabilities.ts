@@ -51,15 +51,15 @@ const DESCRIPTIONS: Record<CapabilityName, CapabilityDescription> = {
     whatItDoes:
       "Registers a single `open-brain hook <event>` entry point with the host CLI so that session start, prompt submission, tool use, stop, and pre-compaction can consult the vault. Each hook either stays silent or returns a short block of context, and it always has a time budget.",
     whatItReads:
-      "This vault only: its index, its living state, its routing table, and its preference core. Nothing outside the vault root is read.",
+      "This vault only: its index, its living state, its routing table, and its preference core. Locating it can probe parent directories for one, existence checks and listings, never a read of a stranger directory's content.",
     whatItWrites:
       "The managed hook entries in the host settings file, after backing up the original once, plus the vault's own hook artifacts. Entries you or another tool put in that file are preserved untouched.",
     whatItCosts:
-      "Nothing. No model call, no network call. The only cost is local time, capped by a per-hook budget of 2000 ms after which the hook returns what it already has.",
+      "Nothing. No model call, no network call. The only cost is local time, capped by a 2000 ms per-hook budget: a handler that checks in before the deadline returns what it has, and one still running past it is dropped in silence rather than killed mid-write.",
     howToDisable:
       "Run `open-brain capabilities disable hooks` to stop every hook immediately, then `open-brain hooks uninstall` to remove the wiring from the host settings file.",
     riskIfEnabled:
-      "Your AI CLI runs one extra local command per event, which costs a fraction of a second. A hook can never fail a session: it either says nothing or refuses a single action with an explanation.",
+      "Your AI CLI runs one extra local command per event, a fraction of a second. A hook never crashes a session: every exception is caught and it exits quietly. It can still refuse a call before it happens, block one after with an explanation, or end a turn with a reminder.",
   },
   capture: {
     name: "capture",
@@ -101,7 +101,7 @@ const DESCRIPTIONS: Record<CapabilityName, CapabilityDescription> = {
     whatItReads:
       "Staged candidates only. It never reads transcripts directly and never reads the preference kernel.",
     whatItWrites:
-      "Classification results attached to the staged candidates, and a local counter of the calls spent today.",
+      "The full text of the staged candidates it is given, to a workspace file in the system temporary directory, outside the vault. That workspace is not indexed, not scanned, not covered by transcript purge, and not deleted by Open Brain when the run ends. It also updates a local counter of the calls spent today, under .open-brain/local/, outside the indexed vault.",
     whatItCosts:
       "Money. This is the only capability in Open Brain that spends anything: every run makes model calls billed by whichever provider your CLI is configured against. Calls are capped by capabilities.classifier.daily_call_budget, 25 per day by default, and a run stops when the budget is spent. The cap in force is printed by `open-brain capabilities list`.",
     howToDisable:
@@ -144,19 +144,19 @@ const DESCRIPTIONS: Record<CapabilityName, CapabilityDescription> = {
   },
   "learning.consolidate": {
     name: "learning.consolidate",
-    title: "Delete beliefs that have lost their support",
+    title: "Fold a named document into its archive",
     whatItDoes:
-      "Removes beliefs whose confidence has collapsed, together with the journal entries that only existed to support them. This is the single subtractive operation in Open Brain.",
+      "Moves the overflow of one document you name, once it passes its declared ceiling, into that document's archive, leaving a pointer behind. Open Brain's one operation that trims a live document; it never touches the belief store, a belief's confidence, or anything the evaluator wrote.",
     whatItReads:
-      "The belief store, the decision journal, and the confidence values written by the evaluator.",
+      "The document you name, whatever archive Open Brain has already built for it, and Open Brain's own record of the last write it made to that document.",
     whatItWrites:
-      "It deletes. Consolidated beliefs and their supporting entries are removed from the vault, and a consolidation record is written stating exactly what was removed and why.",
+      "The trimmed document, its archive file, and a journal entry recording what moved and why. It never deletes: the overflow lands in the archive intact, reachable through the pointer left in the document.",
     whatItCosts:
-      "No money. It costs data, and Open Brain cannot give that data back on its own.",
+      "No money. It moves bytes out of the live document into 90_archive/consolidation; getting them back needs an explicit `--restore --confirm <path>`, never automatic.",
     howToDisable:
       "Run `open-brain capabilities disable learning.consolidate`. It never arms implicitly: not through a preset, not through --yes, not by enabling its parent.",
     riskIfEnabled:
-      "The way back is `open-brain learn consolidate --restore`, which restores the document from its own archive; git plays no part in it, and Open Brain never shells out to git at all. The restore's byte-for-byte reversibility is proven on seven fixtures before a consolidation is ever allowed to run. What is not reversible is losing the archive files themselves, so treat 90_archive/consolidation with the same care as the rest of the vault.",
+      "The way back is `open-brain learn consolidate --document <path> --restore --confirm <path>`, proven byte-exact on seven fixtures before a consolidation is ever allowed to run; git plays no part in either direction. What is not reversible is losing the archive files themselves, so treat 90_archive/consolidation with the same care as the rest of the vault.",
     parent: "learning",
   },
 };

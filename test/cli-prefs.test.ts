@@ -65,6 +65,10 @@ test("prefs add wires auto-regen through the CLI", async (t) => {
     "--text", "Always confirm before deleting.",
     "--weight", "5",
     "--status", "law",
+    // A test spawns a child process, so standard input is a pipe and the
+    // preference kernel refuses the write unless the waiver is explicit.
+    // gate-human-presence.test.ts is where that refusal is asserted.
+    "--unattended",
   ]);
   assert.equal(add.exitCode, 0, add.stderr);
   const addResult = JSON.parse(add.stdout) as {
@@ -83,6 +87,7 @@ test("prefs add wires auto-regen through the CLI", async (t) => {
     "--id", "cli-smoke-pref",
     "--text", "duplicate",
     "--weight", "1",
+    "--unattended",
   ]);
   assert.notEqual(duplicate.exitCode, 0, `duplicate add should fail; stderr: ${duplicate.stderr}`);
 });
@@ -99,6 +104,7 @@ test("prefs add below core threshold does not regenerate the core", async (t) =>
     "--id", "cli-low-weight-pref",
     "--text", "Minor stylistic nudge.",
     "--weight", "2",
+    "--unattended",
   ]);
   assert.equal(add.exitCode, 0, add.stderr);
   const addResult = JSON.parse(add.stdout) as { regenerated: boolean };

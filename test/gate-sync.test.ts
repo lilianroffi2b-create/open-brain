@@ -21,7 +21,7 @@ import {
   syncPending,
   syncStaged,
 } from "../src/gate/review.js";
-import { SyncGateError } from "../src/gate/types.js";
+import { SyncGateError, type ValidateResult } from "../src/gate/types.js";
 import {
   createPreferenceLedger,
   loadPreferenceLedger,
@@ -85,6 +85,32 @@ async function stage(root: string, options: StageOptions = {}): Promise<string> 
     harness: "claude-code",
   });
   return result.candidate.id;
+}
+
+/**
+ * A decision made the way a human makes one: the batch is presented, the token
+ * that presentation printed is retyped, and standard input is a terminal.
+ *
+ * The gate has no default for any of that on purpose, so every test that
+ * decides a batch has to say which proof it is exercising. A test that could
+ * quietly omit the proof would be a test that stops noticing when the proof
+ * stops being required.
+ */
+async function validateAsHuman(
+  root: string,
+  batchId: string,
+  approve: string,
+): Promise<ValidateResult> {
+  const shown = await showBatch(root, config, batchId);
+  return validateApply(root, config, {
+    batchId,
+    approve,
+    proof: {
+      kind: "human",
+      confirm: shown.confirmation_token,
+      presence: { interactive: true, unattended: false },
+    },
+  });
 }
 
 function preferenceItem(id: string, target: string): ClassificationItem {
@@ -176,10 +202,7 @@ test("rejecting everything writes nothing, and the kernel stays byte identical",
   });
   const before = await kernelBytes(root);
 
-  const result = await validateApply(root, config, {
-    batchId: prepared.batch_id,
-    approve: "",
-  });
+  const result = await validateAsHuman(root, prepared.batch_id, "");
   assert.deepEqual(result.approved_indices, []);
   assert.deepEqual(result.rejected_indices, [1]);
   assert.equal(result.phase, "complete");
@@ -208,10 +231,7 @@ test("an approved item is written and an unchecked one is rejected, with no abst
   });
   assert.equal(prepared.items, 2);
 
-  const result = await validateApply(root, config, {
-    batchId: prepared.batch_id,
-    approve: "1",
-  });
+  const result = await validateAsHuman(root, prepared.batch_id, "1");
   assert.deepEqual(result.approved_indices, [1]);
   assert.deepEqual(result.rejected_indices, [2]);
 
@@ -238,10 +258,7 @@ test("a validated preference reaches the registry with its domains, why, and app
     selectionId: slice.selection_id,
   });
 
-  const result = await validateApply(root, config, {
-    batchId: prepared.batch_id,
-    approve: "1",
-  });
+  const result = await validateAsHuman(root, prepared.batch_id, "1");
   assert.deepEqual(result.approved_indices, [1]);
   assert.deepEqual(result.warnings, []);
 
@@ -274,7 +291,7 @@ test("a recorded rejection can never be approved", async (t) => {
   assert.deepEqual(prepared.reject_only_indices, [2]);
 
   await assert.rejects(
-    () => validateApply(root, config, { batchId: prepared.batch_id, approve: "1,2" }),
+    () => validateAsHuman(root, prepared.batch_id, "1,2"),
     (error: unknown) => error instanceof SyncGateError && /recorded rejection/u.test(String(error)),
   );
 
@@ -298,9 +315,9 @@ test("a batch that is already decided is never decided a second way", async (t) 
     selectionId: slice.selection_id,
   });
 
-  await validateApply(root, config, { batchId: prepared.batch_id, approve: "1" });
+  await validateAsHuman(root, prepared.batch_id, "1");
   await assert.rejects(
-    () => validateApply(root, config, { batchId: prepared.batch_id, approve: "1,2" }),
+    () => validateAsHuman(root, prepared.batch_id, "1,2"),
     (error: unknown) => error instanceof SyncGateError && /already decided|frozen once/u.test(String(error)),
   );
 
@@ -319,10 +336,10 @@ test("replaying the same decision has no second effect", async (t) => {
     selectionId: slice.selection_id,
   });
 
-  await validateApply(root, config, { batchId: prepared.batch_id, approve: "1" });
+  await validateAsHuman(root, prepared.batch_id, "1");
   const afterFirst = await kernelBytes(root);
 
-  const second = await validateApply(root, config, { batchId: prepared.batch_id, approve: "1" });
+  const second = await validateAsHuman(root, prepared.batch_id, "1");
   assert.equal(second.phase, "complete");
   const afterSecond = await kernelBytes(root);
   assert.equal(afterSecond.ledger, afterFirst.ledger);
@@ -332,6 +349,95 @@ test("replaying the same decision has no second effect", async (t) => {
   assert.equal(third.result?.phase, "complete");
   const afterThird = await kernelBytes(root);
   assert.equal(afterThird.ledger, afterFirst.ledger);
+});
+
+test("the gate refuses a decision nothing ties to a human, and writes nothing", async (t) => {
+  const root = await newVault("open-brain-gate-presence-");
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const id = await stage(root);
+  const slice = await syncStaged(root, config);
+  const prepared = await prepareBatch(root, config, {
+    items: [preferenceItem(id, "short-answers")],
+    selectionId: slice.selection_id,
+  });
+  const before = await kernelBytes(root);
+  const shown = await showBatch(root, config, prepared.batch_id);
+
+  // No terminal, no waiver: the flag says nothing about who typed it.
+  await assert.rejects(
+    () => validateApply(root, config, {
+      batchId: prepared.batch_id,
+      approve: "1",
+      proof: {
+        kind: "human",
+        confirm: shown.confirmation_token,
+        presence: { interactive: false, unattended: false },
+      },
+    }),
+    (error: unknown) => /not a terminal/u.test(String(error)),
+  );
+
+  // A terminal, but a token nobody was given.
+  await assert.rejects(
+    () => validateApply(root, config, {
+      batchId: prepared.batch_id,
+      approve: "1",
+      proof: {
+        kind: "human",
+        confirm: "deadbeef",
+        presence: { interactive: true, unattended: false },
+      },
+    }),
+    (error: unknown) => error instanceof SyncGateError && /does not match/u.test(String(error)),
+  );
+
+  // A replay claimed for a decision that was never frozen.
+  await assert.rejects(
+    () => validateApply(root, config, {
+      batchId: prepared.batch_id,
+      approve: "1",
+      proof: { kind: "replay" },
+    }),
+    (error: unknown) => error instanceof SyncGateError && /nothing to replay/u.test(String(error)),
+  );
+
+  const after = await kernelBytes(root);
+  assert.equal(after.ledger, before.ledger);
+  assert.equal(after.core, before.core);
+  assert.equal((await loadBatchState(root, config, prepared.batch_id))?.decision, null);
+});
+
+test("a batch that was never presented has no token to retype", async (t) => {
+  const root = await newVault("open-brain-gate-unpresented-");
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const id = await stage(root);
+  const slice = await syncStaged(root, config);
+  const prepared = await prepareBatch(root, config, {
+    items: [preferenceItem(id, "short-answers")],
+    selectionId: slice.selection_id,
+  });
+
+  await assert.rejects(
+    () => validateApply(root, config, {
+      batchId: prepared.batch_id,
+      approve: "1",
+      proof: {
+        kind: "human",
+        confirm: "",
+        presence: { interactive: true, unattended: false },
+      },
+    }),
+    (error: unknown) => error instanceof SyncGateError && /never presented/u.test(String(error)),
+  );
+
+  // Presenting it twice hands out the same token, so a reader who scrolled
+  // away is never told a different thing the second time.
+  const first = await showBatch(root, config, prepared.batch_id);
+  const second = await showBatch(root, config, prepared.batch_id);
+  assert.equal(first.confirmation_token, second.confirmation_token);
+  assert.match(first.confirmation_token, /^[0-9a-f]{8}$/u);
 });
 
 test("the evidence threshold is enforced by the gate and, independently, by the store", async (t) => {
@@ -464,7 +570,7 @@ test("a broken precondition leaves the store, the state and the kernel byte iden
   );
 
   await assert.rejects(
-    () => validateApply(root, config, { batchId: prepared.batch_id, approve: "1" }),
+    () => validateAsHuman(root, prepared.batch_id, "1"),
     (error: unknown) => error instanceof SyncGateError && /weighs 2 now/u.test(String(error)),
   );
 
@@ -563,19 +669,13 @@ test("a memory note is written, verified, and its candidate is archived", async 
     selectionId: slice.selection_id,
   });
 
-  const result = await validateApply(root, config, {
-    batchId: prepared.batch_id,
-    approve: "1",
-  });
+  const result = await validateAsHuman(root, prepared.batch_id, "1");
   assert.equal(result.phase, "complete");
   assert.equal(result.refs["1"], "10_memory/notes/project_deploy.md");
   assert.deepEqual(result.warnings, []);
   // A note really reached the vault, so the index is refreshed exactly once.
   assert.equal(result.reindexed, true);
-  const replay = await validateApply(root, config, {
-    batchId: prepared.batch_id,
-    approve: "1",
-  });
+  const replay = await validateAsHuman(root, prepared.batch_id, "1");
   assert.equal(replay.reindexed, false);
 
   const note = await readFile(join(root, "10_memory", "notes", "project_deploy.md"), "utf8");
@@ -592,10 +692,7 @@ test("a batch that writes no note never reindexes", async (t) => {
     items: [preferenceItem(id, "short-answers")],
     selectionId: slice.selection_id,
   });
-  const result = await validateApply(root, config, {
-    batchId: prepared.batch_id,
-    approve: "1",
-  });
+  const result = await validateAsHuman(root, prepared.batch_id, "1");
   assert.equal(result.reindexed, false);
 });
 

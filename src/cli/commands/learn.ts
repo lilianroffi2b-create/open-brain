@@ -126,8 +126,23 @@ function guardArguments(
   }
 }
 
+/**
+ * optionalNonNegativeInteger raises a plain Error on anything that is not a
+ * string of digits, negative numbers included, so runCli would render it as a
+ * stack trace rather than a clean refusal. Every read of a numeric flag in
+ * this file goes through this wrapper instead, so a malformed value stays
+ * inside the same clean-error contract as every other refusal here.
+ */
+function safeNonNegativeInteger(args: unknown, name: string): number | undefined {
+  try {
+    return optionalNonNegativeInteger(args, name);
+  } catch {
+    throw new ExpectedError(`--${name} must be a non-negative integer.`);
+  }
+}
+
 function maxChars(args: unknown, fallback: number): number {
-  const value = optionalNonNegativeInteger(args, "max-chars");
+  const value = safeNonNegativeInteger(args, "max-chars");
   if (value === undefined) {
     return fallback;
   }
@@ -138,7 +153,7 @@ function maxChars(args: unknown, fallback: number): number {
 }
 
 function positiveLimit(args: unknown, fallback: number): number {
-  const value = optionalNonNegativeInteger(args, "limit");
+  const value = safeNonNegativeInteger(args, "limit");
   if (value === undefined) {
     return fallback;
   }
@@ -250,8 +265,8 @@ const mirrorCommand = defineCommand({
     guardArguments(args, mirrorArgs, "open-brain learn mirror");
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const config = await loadConfigForCli(root);
-    const total = optionalNonNegativeInteger(args, "max-chars");
-    const days = optionalNonNegativeInteger(args, "days");
+    const total = safeNonNegativeInteger(args, "max-chars");
+    const days = safeNonNegativeInteger(args, "days");
     if (total !== undefined && total < MIN_LIST_CHARS) {
       throw new ExpectedError(`--max-chars must be at least ${String(MIN_LIST_CHARS)} characters.`);
     }
@@ -328,7 +343,7 @@ const journalCommand = defineCommand({
     const session = optionalString(args, "session");
     const since = optionalString(args, "since");
     const until = optionalString(args, "until");
-    const partitions = optionalNonNegativeInteger(args, "partitions");
+    const partitions = safeNonNegativeInteger(args, "partitions");
 
     const options: JournalReadOptions = { limit: positiveLimit(args, DEFAULT_JOURNAL_LIMIT) };
     if (types.length > 0) {

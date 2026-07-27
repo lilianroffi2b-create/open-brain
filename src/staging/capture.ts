@@ -503,7 +503,7 @@ export function renderCaptureLoaderLines(captureEnabled: boolean): string[] {
       "",
       "Before a long session is compacted, or at the end of one, replay the detection over the session transcript:",
       "  open-brain capture scan --transcript <path to the session transcript>",
-      "That reads only inside directories consented to with `open-brain capabilities enable transcripts --root <directory>`.",
+      "That reads only inside directories consented to with `open-brain capabilities enable transcripts --path <directory>`.",
     );
   }
   return lines;

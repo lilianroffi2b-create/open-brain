@@ -38,34 +38,40 @@ The package is pre-release software. Check the release notes before relying on i
 
 ## Commands
 
-Every command accepts `--root <path>` to target a vault outside the current directory. This table lists the full surface; run `open-brain <command> --help` for the exact flags of any one of them.
+Every command below accepts `--root <path>` to target a vault outside the current directory, except `feedback` and `parity`, which do not operate on a vault at all. This table lists the full flag surface; run `open-brain <command> --help` for citty's own rendering of any one of them.
 
 ### Vault lifecycle
 
 | Command | What it does |
 |---|---|
 | `init [target] [--no-git]` | Create a new vault without overwriting existing files. |
-| `update` | Replace only the copied engine and managed integration blocks. |
-| `doctor [--repair]` | Inspect vault wiring; `--repair` fixes only safe generated wiring. |
+| `update` | Replace the copied engine, manifest, and managed loader blocks, and make sure the Free Mode local state matches the config. |
+| `doctor [--repair]` | Inspect vault directories, loaders, the redline record, and capability configuration; `--repair` fixes only safe generated wiring. |
 | `scan` | Scan the vault and write deterministic local index artifacts. |
 | `status [--auto] [--rescan]` | Show vault health, optionally rescanning stale indexes. |
-| `health` | Check vault structure, freshness, and index integrity. |
-| `route <query>`, `route --suggest` | Return the smallest relevant reading route for a request, or propose new routes. |
-| `ingest [--batch-id]` | Import supported files from the configured inbox. |
-| `gc [--write \| --approve \| --apply]` | Propose, approve, or apply safe cleanup. Never deletes outright. |
+| `health` | Check vault structure, freshness, index integrity, and the preference kernel. |
+| `route [<query>] [--suggest] [--min-docs <n>]` | Return the smallest relevant reading route for a request, or propose new routes. |
+| `ingest [--batch-id <id>]` | Import supported files from the configured inbox. |
+| `gc [--write <path> \| --approve <path> --reviewer <name> \| --apply <path>]` | Propose, approve, or apply safe cleanup. Never deletes outright. |
 | `skin <universal\|brain> [--dry-run]` | Apply a portable directory naming preset. |
 | `loader-sync` | Synchronize the generated Free Mode block in supported loaders. |
 | `feedback` | Print opt-in, safe environment details for a feedback report. |
+| `parity [--json]` | Show the frozen parity reference against the private engine. |
 
 ### Preferences and Free Mode
+
+`prefs add` and `prefs log` write to the preference kernel directly, so both
+demand the same proof of human presence as `sync validate`: standard input has
+to be a terminal, or the call has to say `--unattended` and accept the one
+guarantee that removes.
 
 | Command | What it does |
 |---|---|
 | `prefs validate` | Validate the preference ledger without changing it. |
-| `prefs add --id --text --weight` | Create a preference; seeds the always-on core when it qualifies. |
-| `prefs list [--status] [--domain] [--min-weight] [--stale-days]` | List preferences with deterministic filters. |
-| `prefs regen` | Regenerate the preference core and portable loader mirrors. |
-| `prefs log --id --signal` | Append evidence to an existing preference. |
+| `prefs add --id <id> --text <text> --weight <1-5> [--status <status>] [--date <date>] [--core] [--operation-id <id>] [--unattended]` | Create a preference; seeds the always-on core when it qualifies. |
+| `prefs list [--status <status>] [--domain <domain>] [--min-weight <1-5>] [--stale-days <n>]` | List preferences with deterministic filters. |
+| `prefs regen` | Regenerate the preference core and portable loader mirrors from the ledger already on disk. Cannot introduce a preference. |
+| `prefs log --id <id> --signal <signal> [--weight <1-5>] [--status <status>] [--date <date>] [--quote <text>] [--operation-id <id>] [--unattended]` | Append evidence to an existing preference. |
 | `free-mode on`, `free-mode off` | Enable or disable Calibrated Free Mode. |
 | `free-mode status` | Show Free Mode state without exposing fingerprints. |
 | `free-mode dismiss <idea>` | Record an idea so it is never proposed again. |
@@ -78,45 +84,55 @@ Every capability below ships disarmed. See [Everything ships disarmed](#everythi
 
 | Command | What it does |
 |---|---|
-| `onboarding [--interactive] [--dry-run]` | Frame every capability, then ask, one at a time. Nothing is armed without an explicit yes. |
+| `onboarding [--interactive] [--dry-run] [--max-chars <n>]` | Frame every capability, then ask, one at a time. Nothing is armed without an explicit yes. |
 | `capabilities list` | Show what is armed, what is not, and any configuration that contradicts itself. |
-| `capabilities explain <name>` | Say what a capability does, reads, writes, costs, risks, and how to turn it off. |
-| `capabilities enable <name> [--path <dir>] [--target ...] [--provider ...] [--confirm "..."]` | Arm one capability. |
-| `capabilities disable <name>` | Disarm one capability and everything that depends on it, effective immediately. |
+| `capabilities explain <name> [--json] [--max-chars <n>]` | Say what a capability does, reads, writes, costs, risks, and how to turn it off. |
+| `capabilities enable <name> [--path <dir>] [--target claude-code,codex] [--provider none\|claude-code-subagent] [--confirm "..."] [--dry-run]` | Arm one capability. |
+| `capabilities disable <name> [--dry-run]` | Disarm one capability and everything that depends on it, effective immediately. |
 
 ### Hooks and the pre-effect guard
 
 | Command | What it does |
 |---|---|
 | `hooks install [--target claude-code,codex]` | Register the Open Brain hook entry point with the supported host CLIs. |
-| `hooks uninstall [--target ...]` | Remove only the entries Open Brain owns. |
+| `hooks uninstall [--target claude-code,codex]` | Remove only the entries Open Brain owns. |
 | `hooks status` | Report what is wired, what is not, and whether the capability is armed. |
 | `hook <event>` | Run one hook event with its JSON payload on stdin. Called by your host CLI, not by you. |
-| `guard <tool> [--command \| --file \| --patch] [--cwd]` | Ask the pre-effect guard whether a tool call would write to the preference kernel. |
+| `guard <tool> [--command <cmd> \| --file <path> \| --patch <text>] [--cwd <dir>]` | Ask the pre-effect guard whether a tool call would write to the preference kernel. |
 
 ### Capture, transcripts, and classification
 
 | Command | What it does |
 |---|---|
-| `capture scan --transcript <file>` | Replay capture detection over one transcript and stage what it finds. |
-| `capture mine` | Read only: find corrections that keep coming back across distinct sessions. |
+| `capture scan --transcript <file> [--max-messages <n>] [--dry-run]` | Replay capture detection over one transcript and stage what it finds. |
+| `capture mine [--since <days>] [--min-occurrences <n>] [--min-sessions <n>] [--max-chars <n>]` | Read only: find corrections that keep coming back across distinct sessions. |
 | `capture markers [--test "..."]` | Print the capture pre-filter that is actually in force. |
-| `transcripts scan` | List transcript files inside the directories you consented to. |
-| `transcripts show --transcript <file> [--raw]` | Read a bounded sample of one consented transcript, redacted by default. |
-| `transcripts purge [--include-prompt] [--dry-run] [--yes]` | Delete every candidate ever derived from a transcript. |
-| `classify [--dry-run] [--max-items] [--max-chars]` | Send staged candidates to a model for typing and scoring. The only command that spends money. |
+| `transcripts scan [--max-files <n>] [--max-chars <n>]` | List transcript files inside the directories you consented to. |
+| `transcripts show --transcript <file> [--max-messages <n>] [--max-chars <n>] [--raw]` | Read a bounded sample of one consented transcript, redacted by default. |
+| `transcripts purge [--include-prompt] [--dry-run] [--yes]` | Delete every candidate ever derived from a transcript, active and archived. |
+| `classify [--dry-run] [--max-items <n>] [--max-chars <n>]` | Send staged candidates to a model for typing and scoring. The only command that spends money. |
 
 ### The human gate
 
+`sync validate` refuses without proof a human is behind it: standard input has
+to be a terminal and `--confirm` has to repeat the `confirmation_token`
+`sync show` printed for that batch, or the call has to say `--unattended`,
+which waives only the terminal check, never the token.
+
 | Command | What it does |
 |---|---|
-| `staging list \| show \| add \| drop \| compact \| status` | Inspect and manage the staging area, the only free write zone. |
+| `staging list [--status <status>] [--pending] [--include-archived] [--max-chars <n>]` | List staged candidates, capped and with the cost of the listing. |
+| `staging show <id> [--max-chars <n>]` | Show one candidate in full. |
+| `staging add --quote "<text>" [--signal <signal>] [--source <source>] [--markers <list>] [--context <text>] [--harness <name>] [--session-id <id>] [--operation-id <id>]` | Stage a candidate by hand. Works with no capability armed. |
+| `staging drop [--id <ids>] [--status <status>] [--older-than <days>] [--include-archived] [--source <sources>] [--reason <text>] --yes` | Delete active candidates outright. Destructive, needs `--yes`. |
+| `staging compact` | Move decided candidates into their monthly archive. |
+| `staging status` | Count what is staged and what still awaits a decision. |
 | `sync pending` | List the batches that still need a decision. Run this before anything else. |
-| `sync staged [--limit] [--max-chars]` | Return the next deterministic slice of staged candidates. |
-| `sync prepare --input <path> [--selection <id>]` | Turn a classification file into an immutable batch waiting for a decision. |
-| `sync show --batch <id>` | Present a batch item by item. |
+| `sync staged [--limit <n>] [--max-chars <n>]` | Return the next deterministic slice of staged candidates. |
+| `sync prepare --input <path> [--selection <id>] [--max-chars <n>]` | Turn a classification file into an immutable batch waiting for a decision. |
+| `sync show --batch <id> [--from <n>] [--max-chars <n>]` | Present a batch item by item; the response carries the `confirmation_token` validate needs back. |
 | `sync resume --batch <id>` | Pick a batch back up after an interruption. Never runs a classifier. |
-| `sync validate --batch <id> --approve "<numbers>"` (alias `sync apply`) | Freeze your decision and apply exactly it. The only command that writes to the preference kernel. |
+| `sync validate --batch <id> --approve "<numbers>" --confirm <token> [--unattended]` (alias `sync apply`) | Freeze your decision and apply exactly it. The only path from the staging area's sas into the preference kernel. |
 | `sync undo <batch> --yes` | Reverse an applied batch from its own record, not from git. |
 
 ### Learning layer
@@ -126,13 +142,13 @@ Incomplete by design. See [The learning layer is incomplete, and says so](#the-l
 | Command | What it does |
 |---|---|
 | `learn status` | What is armed, what is built, what is absent, and whether the layer is acting. |
-| `learn mirror [--json]` | What the layer believes, what it decided alone, and what it cannot do. |
-| `learn journal` | A bounded read of the decision journal, newest entries first. |
-| `learn sensors [--apply]` | Run one sensor pass. Observes and writes readings; concludes nothing. |
-| `learn evaluate [--show] [--consume]` | Score decisions against what happened; `--consume` lets the verdicts move belief confidence. |
-| `learn beliefs [--id] [--rank]` | The belief population: rank, confidence, counters, lock, and history. |
-| `learn rollback --date <ts> [--apply --confirm <ts>]` | Bring confidences back to a date. Plans first, writes only on a matching confirmation. |
-| `learn consolidate --document <path> [--confirm <path>] [--restore]` | The one subtractive act: folds a bounded document, removing the beliefs it no longer supports. Shows its safety catch first. `--restore --confirm <path>` undoes it from the archive, not from git. |
+| `learn mirror [--json] [--max-chars <n>] [--days <n>]` | What the layer believes, what it decided alone, and what it cannot do. |
+| `learn journal [--limit <n>] [--max-chars <n>] [--type <types>] [--session <id>] [--since <ts>] [--until <ts>] [--partitions <n>]` | A bounded read of the decision journal, newest entries first. |
+| `learn sensors [--run] [--limit <n>] [--max-chars <n>] [--subject <name>]` | Run one sensor pass. Observes and writes readings; concludes nothing. |
+| `learn evaluate [--show] [--consume] [--limit <n>] [--max-chars <n>] [--since <ts>]` | Score decisions against what happened; `--consume` lets the verdicts move belief confidence. |
+| `learn beliefs [--id <id>] [--rank <rank>] [--limit <n>] [--max-chars <n>]` | The belief population: rank, confidence, counters, lock, and history. |
+| `learn rollback --date <ts> [--id <ids>] [--max-chars <n>] [--apply --confirm <ts>]` | Bring confidences back to a date. Plans first, writes only on a matching confirmation. |
+| `learn consolidate --document <path> [--confirm <path>] [--mode strict\|bootstrap\|resume] [--restore]` | The one operation that trims a bounded document, folding its overflow into its archive. Shows its safety catch first. `--restore --confirm <path>` undoes it from the archive, not from git. |
 
 ## Preferences engine
 
@@ -170,17 +186,17 @@ Local Free Mode state lives in `.open-brain/local/free-mode-state.json` and hold
 
 ## Everything ships disarmed
 
-A new vault has seven capabilities, and all of them are off. With every capability disarmed, Open Brain reads nothing outside the vault, writes nothing but its own local index, and never spends a cent. Arming one is deliberate: walk through all of them with `open-brain onboarding`, or read and arm one at a time with `open-brain capabilities explain <name>` and `open-brain capabilities enable <name>`.
+A new vault has seven capabilities, and all of them are off. With every capability disarmed, Open Brain reads nothing outside the vault and never spends a cent on its own, but a command you run yourself, `prefs add`, `staging add`, `sync`, `gc --apply`, and others, still writes: a capability gates what Open Brain does unprompted, never what you explicitly ask it to do. Arming one is deliberate: walk through all of them with `open-brain onboarding`, or read and arm one at a time with `open-brain capabilities explain <name>` and `open-brain capabilities enable <name>`.
 
 | Capability | What it does | What it costs |
 |---|---|---|
 | `hooks` | Wires Open Brain into the events of your AI CLI. | Nothing. No model call, no network call. |
 | `capture` | Fills the staging area with preference and memory candidates. | Nothing. Extraction is deterministic and local. |
 | `transcripts` | Reads session transcripts from directories you name. | No money, no network. Disk reads, and privacy surface: it is the only capability that reads outside the vault root. |
-| `classifier` | Asks a model to classify staged candidates. | Money. The only capability that spends anything, because it is the only one that sends candidate text off your machine, through your configured provider. |
+| `classifier` | Asks a model to classify staged candidates. | Money. The only capability that causes candidate text to leave your machine, handed to your host CLI's own model call. |
 | `learning` | Records what Open Brain did and what happened next. | Nothing. Local disk only. |
 | `learning.evaluate` | Scores beliefs against what actually happened and moves their confidence. | Nothing. Deterministic, local. |
-| `learning.consolidate` | Deletes beliefs that have lost their support. | No money. Data: the one subtractive operation in Open Brain, and it never arms implicitly, not through a preset, not through `--yes`, not by enabling its parent. |
+| `learning.consolidate` | Folds a document you name into its archive once it passes its declared ceiling. | No money. Data: it moves bytes out of the live document, and it never arms implicitly, not through a preset, not through `--yes`, not by enabling its parent. |
 
 `open-brain capabilities list` shows what is armed in a given vault. Disarming a capability with `open-brain capabilities disable <name>` takes effect immediately; it does not delete what the capability already wrote.
 
@@ -204,7 +220,7 @@ A second, independent layer runs after the fact regardless of hooks: every legit
 
 ## Neither the gate nor consolidation depend on git
 
-`open-brain sync` is the only path that writes to the preference kernel, and `open-brain sync undo <batch>` reverses a batch it applied. That reversal reads a record written before the batch touched its first file and sealed after the last one, not the vault's git history. It works on a vault that is not a git repository at all, and it refuses rather than overwrite when a file no longer holds exactly the bytes the batch left behind.
+`open-brain sync validate` is the only path from the staging area's sas into the preference kernel, and `open-brain sync undo <batch>` reverses a batch it applied. That reversal reads a record written before the batch touched its first file and sealed after the last one, not the vault's git history. It works on a vault that is not a git repository at all, and it refuses rather than overwrite when a file no longer holds exactly the bytes the batch left behind. `open-brain prefs add` is a second, deliberate door into the kernel, for a preference you state yourself rather than one proposed for review, and it demands the same proof that a human is present as `sync validate` does: a terminal on standard input, or `--unattended` said out loud. `open-brain prefs regen` only re-renders the kernel's generated core and loader mirrors from the ledger already on disk; it cannot introduce a preference. Every write to the kernel, through either door, is recorded with its own provenance.
 
 `learning.consolidate`, the belief-deletion operation described above, is undone the same way in spirit: `open-brain learn consolidate --document <path> --restore --confirm <path>` restores the document from the archive consolidation moved content into, not from git. Consolidation is only allowed to run at all once `verifyReversibility` has proven that exact restoration byte for byte, across seven fixture cases covering plain text, same-day entries, accented and emoji content, CRLF line endings, JSONL blocks, and multi-round chains; a proof that fails leaves the organ refusing to run rather than moving anything. Neither mechanism needs a git repository.
 

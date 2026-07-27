@@ -297,8 +297,16 @@ function uniqueCandidateId(taken: ReadonlySet<string>, now: Date): string {
 
 /**
  * A deposit that comes from an automatic capture needs the capture capability.
- * A deposit the user types themselves does not: that is the user speaking, not
- * a machine listening, and it stays available on a vault with nothing armed.
+ * A manual deposit does not, and stays available on a vault with nothing armed.
+ *
+ * Be precise about what that means: the manual source is a claim the caller
+ * makes about itself, and an agent can make it too. Nothing here can tell a
+ * person typing from a program typing. What makes the open door acceptable is
+ * not the claim, it is that the staging area is inert: a candidate is a
+ * proposal, and the only path from a proposal to the preference kernel runs
+ * through `sync validate`, which does demand a proof of human presence that a
+ * caller cannot fabricate. Close this door and the capture loop dies; leave the
+ * gate open and nothing else matters.
  */
 function requireDepositCapability(config: VaultConfig, request: DepositRequest): void {
   if (request.source !== MANUAL_SOURCE) {

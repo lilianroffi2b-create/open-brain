@@ -49,9 +49,11 @@ that fact.
 | `PreCompact` | `auto\|manual` | `open-brain hook pre-compact` | 5 s |
 
 The declared timeout stays strictly above the internal budget of 2000 ms, so the
-internal deadline always fires first and the hook gets to return what it already
-has instead of being killed mid-sentence. A test asserts that nesting, because a
-timeout that drifts away from the code drifts in silence.
+internal deadline always fires first: a handler that checks in before that
+deadline returns what it has, and one still running when the deadline hits is
+dropped in silence rather than killed by the host mid-sentence. A test asserts
+that nesting, because a timeout that drifts away from the code drifts in
+silence.
 
 ## What Claude Code does not have
 
@@ -72,8 +74,11 @@ timeout that drifts away from the code drifts in silence.
 
 ## Repair
 
-`open-brain doctor` is the one repair path. It reports wiring that is absent,
-partial, or duplicated, and it never touches an entry Open Brain does not own.
+`open-brain hooks status` reports wiring that is absent, partial, or
+duplicated, and `open-brain hooks install` repairs it, never touching an entry
+Open Brain does not own. `open-brain doctor` covers the rest of the vault, its
+directories, its generated loaders, and the preference kernel's tamper record,
+but it does not open `.claude/settings.json` itself.
 
 ## If you edit a command by hand
 

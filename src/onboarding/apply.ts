@@ -249,7 +249,7 @@ function planOne(
       .filter((item) => item.length > 0);
     if (roots.length === 0) {
       return refuse(
-        `transcripts is the only capability that reads outside the vault, so consent is given per directory and never in general. Nothing was armed. Name a directory: \`open-brain capabilities enable transcripts --root <path>\`.${state.transcripts.roots.length === 0 ? "" : ` Already consented: ${state.transcripts.roots.join(", ")}.`}`,
+        `transcripts is the only capability that reads outside the vault, so consent is given per directory and never in general. Nothing was armed. Name a directory: \`open-brain capabilities enable transcripts --path <path>\`.${state.transcripts.roots.length === 0 ? "" : ` Already consented: ${state.transcripts.roots.join(", ")}.`}`,
       );
     }
     state.transcripts.roots = mergeUnique(state.transcripts.roots, roots);

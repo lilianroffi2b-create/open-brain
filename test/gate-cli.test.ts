@@ -132,12 +132,21 @@ test("the whole protocol runs through the CLI and prints one JSON document per s
   const shown = await runSync(["show", "--root", root, "--batch", batchId]);
   assert.match(String(shown.output.presentation), /short-answers/u);
   assert.deepEqual(shown.output.decision, null);
+  const token = String(shown.output.confirmation_token);
+  assert.match(token, /^[0-9a-f]{8}$/u);
+  assert.match(String(shown.output.next), new RegExp(`--confirm ${token}`, "u"));
 
+  // A test process has a pipe on standard input, which is exactly what an agent
+  // has, so the decision here has to go through the documented escape hatch.
+  // The interactive path is exercised in gate-sync.test.ts and the refusal in
+  // gate-human-presence.test.ts.
   const validated = await runSync([
     "validate",
     "--root", root,
     "--batch", batchId,
     "--approve", "1",
+    "--confirm", token,
+    "--unattended",
   ]);
   assert.deepEqual(validated.output.approved_indices, [1]);
   assert.equal(validated.output.phase, "complete");

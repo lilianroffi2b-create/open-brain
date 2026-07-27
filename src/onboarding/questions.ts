@@ -386,20 +386,20 @@ const QUESTIONS: Record<CapabilityName, CapabilityQuestion> = {
     requirement: {
       kind: "dedicated-confirmation",
       statement:
-        `This is the only capability in Open Brain that deletes. Nothing else removes anything you did not ask it to remove. A yes here is not enough: you are then asked to type ${CONSOLIDATE_CONFIRMATION_PHRASE} exactly. No preset arms it, no global --yes arms it, and arming its parent does not arm it.`,
+        `This is the only capability in Open Brain that trims a document rather than appending to it. A yes here is not enough: you are then asked to type ${CONSOLIDATE_CONFIRMATION_PHRASE} exactly. No preset arms it, no global --yes arms it, and arming its parent does not arm it.`,
     },
     technical: [
-      "It removes beliefs whose confidence has collapsed, together with the journal entries that existed only to support them, and writes a record of exactly what was removed and why.",
+      "It folds the overflow of one document you name into that document's own archive, leaving a pointer behind. It never touches beliefs or their confidence.",
       "It refuses to run in autonomy unless its byte-for-byte reversibility test passes. That safety catch is in the code, not in a guideline.",
       "It takes a cross-process lock before it touches anything, so two runs can never race.",
-      "Git is the only way back. On a vault that is not a git repository, a consolidation cannot be undone.",
+      "The way back does not need git: `--restore --confirm <path>` restores the document from its own archive on any vault.",
     ],
     ifYes: [
-      "The belief store stays small and the journal stops growing without bound.",
-      "You accept permanent loss on a vault you do not version. Arm this on a versioned vault, and run it deliberately rather than on a schedule.",
+      "A document you name stops growing without bound: its overflow moves to its archive.",
+      "Content moves, it does not vanish: it sits in the archive until restored. Arm this deliberately.",
     ],
     ifNo: [
-      "Nothing is ever deleted. The journal and the belief store grow, and you can run a consolidation by hand later if that becomes a problem.",
+      "This capability never runs. The living state still gets trimmed by the end-of-turn hook on its own when it passes its ceiling; that is separate and does not need this armed.",
       "This is the default, and it is the right default for anyone who is not sure.",
     ],
   }),

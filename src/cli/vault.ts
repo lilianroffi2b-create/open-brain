@@ -129,13 +129,13 @@ export async function readJsonFile(path: string): Promise<unknown> {
   try {
     content = await readFile(resolvedPath, "utf8");
   } catch {
-    throw new Error(`Unable to read JSON file: ${resolvedPath}.`);
+    throw new ExpectedError(`Unable to read JSON file: ${resolvedPath}.`);
   }
 
   try {
     return JSON.parse(content) as unknown;
   } catch {
-    throw new Error(`JSON file is invalid: ${resolvedPath}.`);
+    throw new ExpectedError(`JSON file is invalid: ${resolvedPath}.`);
   }
 }
 

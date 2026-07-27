@@ -4,6 +4,7 @@ import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promis
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
+import { ExpectedError } from "./errors.js";
 import { buildGraph, stripRootLabel } from "./graph.js";
 import {
   activePathsFromConfig,
@@ -84,7 +85,7 @@ function proposalId(now: Date): string {
 
 function assertReviewableId(id: string): void {
   if (!/^gc-[a-z0-9-]+$/u.test(id)) {
-    throw new TypeError("GC proposal id is invalid.");
+    throw new ExpectedError("GC proposal id is invalid.");
   }
 }
 
@@ -182,7 +183,7 @@ async function updateArchiveIndex(
  * Produces a reviewable proposal only. It never writes, moves, or deletes vault
  * content. Candidacy (expired ephemeral or cold) is filtered through the full
  * structural guardrails, so masters, index pages and zones, the preferences and
- * archive zones, routing-referenced files, active-chantier docs, and any doc
+ * archive zones, routing-referenced files, active-workstream docs, and any doc
  * with an incoming link are excluded from both candidate reasons.
  */
 export function proposeGc(
@@ -240,10 +241,10 @@ export function reviewGcProposal(
 ): GcProposal {
   assertReviewableId(proposal.id);
   if (decision !== "approved" && decision !== "rejected") {
-    throw new TypeError("GC review decision is invalid.");
+    throw new ExpectedError("GC review decision is invalid.");
   }
   if (!reviewer.trim()) {
-    throw new TypeError("GC review requires a non-empty reviewer.");
+    throw new ExpectedError("GC review requires a non-empty reviewer.");
   }
 
   return {
@@ -274,7 +275,7 @@ export async function applyReviewedGcProposal(
 ): Promise<GcApplyResult> {
   assertReviewableId(proposal.id);
   if (!proposal.review || proposal.review.decision !== "approved") {
-    throw new Error("GC proposal must be explicitly reviewed and approved before apply.");
+    throw new ExpectedError("GC proposal must be explicitly reviewed and approved before apply.");
   }
 
   const currentByPath = new Map(currentRecords.map((record) => [record.path, record]));

@@ -1,3 +1,4 @@
+import { ExpectedError } from "../core/errors.js";
 import {
   PREFERENCE_LEDGER_SCHEMA_VERSION,
   type Preference,
@@ -109,25 +110,25 @@ export function addPreference(
   assertValidPreferenceLedger(ledger);
 
   if (typeof input.id !== "string" || !PREFERENCE_ID_PATTERN.test(input.id)) {
-    throw new TypeError("Preference id must be a kebab-case identifier.");
+    throw new ExpectedError("Preference id must be a kebab-case identifier.");
   }
   if (ledger.preferences.some((preference) => preference.id === input.id)) {
-    throw new RangeError(`Preference id already exists: ${input.id}.`);
+    throw new ExpectedError(`Preference id already exists: ${input.id}.`);
   }
   if (typeof input.text !== "string" || input.text.trim().length === 0) {
-    throw new TypeError("Preference text must be a non-empty string.");
+    throw new ExpectedError("Preference text must be a non-empty string.");
   }
   if (!isPreferenceWeight(input.weight)) {
-    throw new TypeError("Preference weight must be from 1 through 5.");
+    throw new ExpectedError("Preference weight must be from 1 through 5.");
   }
   if (input.status !== undefined && !isPreferenceStatus(input.status)) {
-    throw new TypeError("Preference status is invalid.");
+    throw new ExpectedError("Preference status is invalid.");
   }
   if (input.date !== undefined && !isLedgerDate(input.date)) {
-    throw new TypeError("Preference date must be YYYY-MM-DD.");
+    throw new ExpectedError("Preference date must be YYYY-MM-DD.");
   }
   if (input.core !== undefined && typeof input.core !== "boolean") {
-    throw new TypeError("Preference core must be a boolean when provided.");
+    throw new ExpectedError("Preference core must be a boolean when provided.");
   }
   if (input.domains !== undefined) {
     if (
@@ -135,17 +136,17 @@ export function addPreference(
       || input.domains.length === 0
       || input.domains.some((domain) => typeof domain !== "string" || domain.trim().length === 0)
     ) {
-      throw new TypeError("Preference domains must be a non-empty array of non-empty strings.");
+      throw new ExpectedError("Preference domains must be a non-empty array of non-empty strings.");
     }
   }
   for (const field of ["why", "apply", "source"] as const) {
     const value = input[field];
     if (value !== undefined && (typeof value !== "string" || value.trim().length === 0)) {
-      throw new TypeError(`Preference ${field} must be a non-empty string when provided.`);
+      throw new ExpectedError(`Preference ${field} must be a non-empty string when provided.`);
     }
   }
   if (input.quote !== undefined && typeof input.quote !== "string") {
-    throw new TypeError("Preference quote must be a string when provided.");
+    throw new ExpectedError("Preference quote must be a string when provided.");
   }
 
   const date = input.date ?? toLedgerDate(now);
@@ -198,24 +199,24 @@ export function logPreference(
   assertValidPreferenceLedger(ledger);
 
   if (typeof input.signal !== "string" || input.signal.trim().length === 0) {
-    throw new TypeError("Preference evidence requires a non-empty signal.");
+    throw new ExpectedError("Preference evidence requires a non-empty signal.");
   }
   if (input.date !== undefined && !isLedgerDate(input.date)) {
-    throw new TypeError("Preference evidence date must be YYYY-MM-DD.");
+    throw new ExpectedError("Preference evidence date must be YYYY-MM-DD.");
   }
   if (input.weight !== undefined && !isPreferenceWeight(input.weight)) {
-    throw new TypeError("Preference evidence weight must be from 1 through 5.");
+    throw new ExpectedError("Preference evidence weight must be from 1 through 5.");
   }
   if (input.status !== undefined && !isPreferenceStatus(input.status)) {
-    throw new TypeError("Preference status is invalid.");
+    throw new ExpectedError("Preference status is invalid.");
   }
   if (input.quote !== undefined && typeof input.quote !== "string") {
-    throw new TypeError("Preference evidence quote must be a string.");
+    throw new ExpectedError("Preference evidence quote must be a string.");
   }
 
   const current = ledger.preferences.find((preference) => preference.id === id);
   if (!current) {
-    throw new RangeError(`Unknown preference id: ${id}.`);
+    throw new ExpectedError(`Unknown preference id: ${id}.`);
   }
 
   const date = input.date ?? toLedgerDate(now);
@@ -466,7 +467,7 @@ export function applyPreferenceOperation(
 ): PreferenceOperationOutcome {
   if (input.operationId !== undefined) {
     if (input.operationId.trim().length === 0) {
-      throw new TypeError("Preference operation id must be a non-empty string.");
+      throw new ExpectedError("Preference operation id must be a non-empty string.");
     }
     const previous = readPreferenceOperations(ledger)
       .find((record) => record.operation_id === input.operationId);
@@ -494,7 +495,7 @@ export function applyPreferenceOperation(
     : logPreference(ledger, input.id, input, now);
   const preference = next.preferences.find((candidate) => candidate.id === input.id);
   if (!preference) {
-    throw new RangeError(`Unknown preference id: ${input.id}.`);
+    throw new ExpectedError(`Unknown preference id: ${input.id}.`);
   }
 
   if (input.operationId === undefined) {

@@ -143,7 +143,7 @@ test("a disarmed vault never touches a path outside itself", async () => {
         assert.match(error.message, /does-not-exist/u, "the refusal names the path");
         assert.match(
           error.message,
-          /capabilities enable transcripts --root/u,
+          /capabilities enable transcripts --path/u,
           "the refusal names the command that would allow it",
         );
         return true;
@@ -354,7 +354,7 @@ test("transcripts scan says nothing was read when the capability is disarmed", a
     const output = asRecord(run.output);
     assert.deepEqual(output.files, []);
     assert.match(String(output.next), /disarmed/u);
-    assert.match(String(output.next), /capabilities enable transcripts --root/u);
+    assert.match(String(output.next), /capabilities enable transcripts --path/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

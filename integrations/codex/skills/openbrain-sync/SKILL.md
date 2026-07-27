@@ -79,6 +79,10 @@ never offered as a checkable option, and can never enter the approved list.
 The presentation is capped and reports its cost. When it announces a truncation,
 read the rest with `--from <n>` before deciding.
 
+The response also carries a `confirmation_token`: keep it. `sync validate`
+needs it back, unchanged, to prove this exact batch was actually shown before
+anything was approved.
+
 **Codex has no AskUserQuestion.** Ask in plain text instead: list the numbered
 items, in groups of at most four, and ask the user to answer with the numbers
 they approve. State explicitly, every time, that an item not named is rejected
@@ -89,8 +93,16 @@ is what replaces the checkboxes; do not skip it.
 ## 5. One single apply
 
 ```
-open-brain sync validate --batch <batch_id> --approve "<indices you approve>"
+open-brain sync validate --batch <batch_id> --approve "<indices you approve>" --confirm <confirmation_token> --unattended
 ```
+
+`--confirm` must be exactly the `confirmation_token` `sync show` returned for
+this batch in step 4; retyping it is what proves the batch was read rather than
+approved sight unseen. `--unattended` is required here because this command
+runs from an agent's shell, which has no terminal on standard input to prove a
+human is present; it waives only that one guarantee, never the token, and the
+CLI prints a warning on stderr every time it is used. Do not add `--unattended`
+to any command this skill does not explicitly show it on.
 
 To reject everything, pass an empty string. The flag has no default and must
 always be typed. The gate rechecks every precondition before the first mutation,

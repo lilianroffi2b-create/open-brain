@@ -18,18 +18,24 @@ import {
  *
  * 1. A hook never fails loudly. Every exception is caught here and the process
  *    exits 0 in silence. The only deliberate non-zero exit is a soft block.
- * 2. A hook has a time budget. Past the budget it returns what it already has
- *    and gets out of the way; it never holds a session open.
+ * 2. A hook has a time budget. A handler that checks in before the budget
+ *    runs out returns what it has by then; one still running when the budget
+ *    fires is dropped in silence rather than killed mid-write. It never holds
+ *    a session open.
  * 3. A hook is never destructive. It moves content it owns, it never drops it.
  * 4. A hook respects capabilities. With capabilities.hooks disarmed the
  *    envelope exits 0 before reading a single byte of vault content.
- * 5. doctor is the one repair path for the wiring, on both hosts.
+ * 5. hooks status reports the wiring and hooks install repairs it, on both
+ *    hosts; doctor covers the rest of the vault, not the host settings files.
  *
  * Output contract. stdout never carries bare text: it carries a JSON envelope
  * whose shape depends on the event, and on the host for one of them.
  *
- *   SessionStart, context    exit 0, hookSpecificOutput.additionalContext
- *   UserPromptSubmit, ctx    exit 0, hookSpecificOutput.additionalContext
+ *   SessionStart, context    exit 0, hookSpecificOutput.additionalContext,
+ *                            plus hookSpecificOutput.budget when the organ
+ *                            that built the context reported one
+ *   UserPromptSubmit, ctx    exit 0, hookSpecificOutput.additionalContext,
+ *                            same optional budget field
  *   PreToolUse, refusal      exit 0, hookSpecificOutput.permissionDecision deny
  *   PostToolUse, block       exit 0, { decision: "block", reason }
  *   Stop, block              { decision: "block", reason } on Codex,
@@ -424,13 +430,19 @@ function emitContext(
   event: HookEvent,
   payload: Record<string, unknown>,
   text: string,
+  budget: ContextBudget | undefined,
 ): void {
-  writeEnvelope({
-    hookSpecificOutput: {
-      hookEventName: hostEventName(event, payload),
-      additionalContext: text,
-    },
-  });
+  const hookSpecificOutput: Record<string, unknown> = {
+    hookEventName: hostEventName(event, payload),
+    additionalContext: text,
+  };
+  // Only added when the organ actually reported one: an envelope with no
+  // budget field is what an event that never carried one still looks like,
+  // so an unrelated handler's contract test never sees a new key appear.
+  if (budget !== undefined) {
+    hookSpecificOutput.budget = budget;
+  }
+  writeEnvelope({ hookSpecificOutput });
 }
 
 function emit(
@@ -449,7 +461,7 @@ function emit(
   }
   const context = outcome.context?.trim() ?? "";
   if (context.length > 0) {
-    emitContext(event, payload, context);
+    emitContext(event, payload, context, outcome.budget);
   }
 }
 

@@ -296,7 +296,7 @@ export function gcGuardReason(context: GcGuardContext): string | undefined {
     return "routing_reference";
   }
   if (active) {
-    return "active_chantier";
+    return "active_workstream";
   }
   if (hasIncoming) {
     return "has_incoming_link";

@@ -36,8 +36,11 @@ depends on the event, and for one event on the host.
 | `stop`, block | `{"decision":"block","reason":"..."}` on Codex, exit 2 with the message on stderr on Claude Code |
 | any event, nothing to say | exit 0, empty stdout |
 
-There is no other exit code. Ever. A hook that fails internally exits 0 in
-silence, because a hook that fails loudly breaks a session.
+A hook that fails internally exits 0 in silence, because a hook that fails
+loudly breaks a session. The one other exit code in this surface is not a hook
+event at all: `open-brain hook <name>` with a name it does not recognize exits
+2 with a message on stderr before the runtime above ever runs, because a typo
+in the event name is a wiring bug worth seeing, not a session worth breaking.
 
 **A refusal and a soft block are not the same thing.** `permissionDecision: deny`
 is the host's first-class refusal: the tool call does not happen. Exit 2 is a
@@ -88,8 +91,10 @@ nothing happens at all: the engine never picks a ceiling for you.
 1. **It never fails loudly.** Every exception is caught and the process exits 0.
    The only deliberate non-zero exit is a soft block.
 2. **It has a time budget.** 2000 ms by default, overridable with
-   `OPEN_BRAIN_HOOK_BUDGET_MS`. Past the budget it returns what it has and gets
-   out of the way. No hook holds a session open.
+   `OPEN_BRAIN_HOOK_BUDGET_MS`. A handler that checks in before the budget runs
+   out returns what it has by then; one still running when the budget fires is
+   dropped in silence rather than killed mid-sentence. No hook holds a session
+   open.
 3. **It is never destructive.** No hook deletes anything, rewrites your prose, or
    touches the preference core. The one hook that moves content, the living
    state consolidation above, moves it into the archive and leaves a pointer.
@@ -97,7 +102,10 @@ nothing happens at all: the engine never picks a ceiling for you.
    hook exits 0 before reading a single byte of vault content. Wiring is not
    arming: you can install the wiring and arm it later, or disarm it without
    touching the host settings file.
-5. **`doctor` is the one repair path** for the wiring, on both hosts.
+5. **`hooks status` reports the wiring and `hooks install` repairs it**, on
+   both hosts. Running install again adds back anything missing or partial
+   without touching an entry Open Brain does not own. `doctor` covers the rest
+   of the vault, not the host settings files.
 
 ## Cost, and how it is reported
 

@@ -95,6 +95,10 @@
         "severity": "error"
       },
       {
+        "name": "preferences",
+        "severity": "error"
+      },
+      {
         "name": "freshness",
         "severity": "ok"
       },
