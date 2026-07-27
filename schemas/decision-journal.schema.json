@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/decision-journal.schema.json",
+  "title": "OpenBrain Decision Journal Entry",
+  "description": "One line of a monthly journal partition under 10_memory/learning/journal/. Entries are append-only and never rewritten. A line, newline included, always stays under 4096 bytes: that bound is what makes concurrent appends atomic without a lock, so it is a correctness property rather than a style rule. A line that had to be shrunk to fit carries truncated: true, and it still satisfies its own contract.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/decision"
+    },
+    {
+      "$ref": "#/$defs/consolidation"
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "description": "UTC, second precision, no other format is accepted.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "entry_id": {
+      "type": "string",
+      "pattern": "^dec_\\d{8}T\\d{4}_[0-9a-f]{4,16}$"
+    },
+    "belief_id": {
+      "type": "string",
+      "pattern": "^b_[a-z0-9]+(?:_[a-z0-9]+)*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "decision": {
+      "type": "object",
+      "description": "What Open Brain chose, not only what it produced.",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "ts",
+        "session",
+        "type",
+        "input",
+        "options",
+        "choice",
+        "score",
+        "beliefs_applied",
+        "beliefs_evicted",
+        "documents",
+        "cost",
+        "verdict"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "description": "Absent on a line written before versioning; it then reads as 1."
+        },
+        "id": {
+          "$ref": "#/$defs/entry_id"
+        },
+        "ts": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "session": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The host session id, or \"manual\" for a run started by hand."
+        },
+        "type": {
+          "enum": [
+            "route",
+            "load",
+            "produced",
+            "belief_applied",
+            "pruned",
+            "ruling"
+          ]
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The prompt itself is never copied here: only a hash and a bounded summary. The full text already lives in the session transcript.",
+          "required": [
+            "hash",
+            "summary"
+          ],
+          "properties": {
+            "hash": {
+              "type": "string",
+              "pattern": "^sha1:[0-9a-f]{40}$"
+            },
+            "summary": {
+              "type": "string",
+              "maxLength": 160
+            }
+          }
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "choice": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "When it is not null and options is not empty, it must be one of the options."
+        },
+        "score": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "beliefs_applied": {
+          "type": "array",
+          "description": "The join key of the whole learning loop. Never shortened to fit the line cap.",
+          "items": {
+            "$ref": "#/$defs/belief_id"
+          }
+        },
+        "beliefs_evicted": {
+          "type": "array",
+          "description": "Disjoint from beliefs_applied.",
+          "items": {
+            "$ref": "#/$defs/belief_id"
+          }
+        },
+        "documents": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tokens_estimated",
+            "ms"
+          ],
+          "properties": {
+            "tokens_estimated": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "verdict": {
+          "enum": [
+            "good",
+            "bad",
+            "undetermined",
+            null
+          ]
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "Means the line WAS shrunk to fit the cap. Once set it is preserved, never cleared."
+        }
+      }
+    },
+    "consolidation": {
+      "type": "object",
+      "description": "The record of the one subtractive operation of the layer. It moves the overflow of a bounded document into a verified archive and deletes nothing.",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "ts",
+        "type",
+        "document",
+        "before",
+        "after",
+        "blocks",
+        "deconsolidation_verified"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/entry_id"
+        },
+        "ts": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "type": {
+          "const": "consolidated"
+        },
+        "document": {
+          "type": "string",
+          "minLength": 1
+        },
+        "before": {
+          "$ref": "#/$defs/digest_pair"
+        },
+        "after": {
+          "$ref": "#/$defs/digest_pair",
+          "description": "Never larger than before. On an abort, strictly identical to before."
+        },
+        "blocks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/block"
+          }
+        },
+        "deconsolidation_verified": {
+          "type": "boolean",
+          "description": "The consolidated document gives back exactly the same origin once its index is resolved against the archives."
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "digest_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "size",
+        "sha256"
+      ],
+      "properties": {
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive",
+        "period",
+        "entries",
+        "size",
+        "sha256_block",
+        "reread_ok"
+      ],
+      "properties": {
+        "archive": {
+          "type": "string",
+          "minLength": 1
+        },
+        "period": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}/\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "entries": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256_block": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reread_ok": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

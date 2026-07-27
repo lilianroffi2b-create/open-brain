@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/classification.schema.json",
+  "title": "OpenBrain Classification",
+  "description": "The file the classifier writes for one slice of the staging area: a raw JSON array, no prose, no Markdown fence around it. It is the input contract of the gate. The canonical shape and its validators live in src/learning/types.ts (parseClassification, parseClassificationDocument), re-exported unchanged from src/classifier/contract.ts, and this schema mirrors that contract.",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 200,
+  "items": { "$ref": "#/$defs/item" },
+  "$defs": {
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "quote"],
+      "properties": {
+        "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "quote": { "type": "string", "minLength": 1, "maxLength": 5000 }
+      }
+    },
+    "id": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "mergedIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Absent means the item speaks for exactly its own id. Present, it must include its own id."
+    },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 5000 },
+    "recommendation": { "type": "string", "enum": ["approve", "reject_only"] },
+    "evidenceBasis": {
+      "type": ["string", "null"],
+      "enum": ["recurrence", "documented_pain", "insufficient", null]
+    },
+    "item": {
+      "oneOf": [
+        { "$ref": "#/$defs/preferenceItem" },
+        { "$ref": "#/$defs/weightItem" },
+        { "$ref": "#/$defs/memoryItem" }
+      ]
+    },
+    "preferenceItem": {
+      "title": "Proposes a new preference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "type", "target", "content", "proposed_weight", "reason", "proofs", "status",
+        "domains", "why", "apply"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "merged_ids": { "$ref": "#/$defs/mergedIds" },
+        "type": { "const": "preference" },
+        "target": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "description": "The kebab-case id the new preference will be created under."
+        },
+        "content": { "type": "string", "minLength": 1, "maxLength": 100000 },
+        "proposed_weight": {
+          "const": 2,
+          "description": "A new preference is never born above this weight; it earns more through evidence."
+        },
+        "reason": { "$ref": "#/$defs/reason" },
+        "proofs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/proof" } },
+        "status": { "const": "proposed" },
+        "weak": { "type": "boolean" },
+        "recommendation": { "$ref": "#/$defs/recommendation" },
+        "evidence_basis": { "$ref": "#/$defs/evidenceBasis" },
+        "domains": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" }
+        },
+        "why": { "type": "string", "minLength": 1, "maxLength": 5000 },
+        "apply": { "type": "string", "minLength": 1, "maxLength": 5000 }
+      }
+    },
+    "weightItem": {
+      "title": "Proposes a weight change on an existing preference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "target", "content", "proposed_weight", "reason", "proofs", "status"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "merged_ids": { "$ref": "#/$defs/mergedIds" },
+        "type": { "const": "weight" },
+        "target": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "description": "The kebab-case id of the existing preference this item proposes to reweigh."
+        },
+        "content": { "type": "string", "minLength": 1, "maxLength": 100000 },
+        "proposed_weight": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "reason": { "$ref": "#/$defs/reason" },
+        "proofs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/proof" } },
+        "status": { "const": "proposed" },
+        "weak": { "type": "boolean" },
+        "recommendation": { "$ref": "#/$defs/recommendation" },
+        "evidence_basis": { "$ref": "#/$defs/evidenceBasis" }
+      }
+    },
+    "memoryItem": {
+      "title": "Proposes a durable memory note",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "target", "content", "proposed_weight", "reason", "proofs", "status"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "merged_ids": { "$ref": "#/$defs/mergedIds" },
+        "type": { "const": "memory" },
+        "target": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 100000 },
+        "proposed_weight": { "const": null, "description": "A note carries no weight." },
+        "reason": { "$ref": "#/$defs/reason" },
+        "proofs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/proof" } },
+        "status": { "const": "proposed" },
+        "weak": { "type": "boolean" },
+        "recommendation": { "$ref": "#/$defs/recommendation" },
+        "evidence_basis": { "$ref": "#/$defs/evidenceBasis" }
+      }
+    }
+  }
+}

@@ -1,9 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 
+import { ExpectedError } from "./errors.js";
+import { atomicWriteText, fsyncDirectory } from "./fs-atomic.js";
+import { isInsideVault } from "./scan.js";
 import { extractHeadings, extractSummary, sha256, toPosixPath } from "./text.js";
 import type { VaultConfig } from "./types.js";
+
+/**
+ * Traversal bounds. An export file is arbitrary data from somewhere else, so
+ * nothing about its shape can be trusted: a conversation graph deep enough to
+ * exhaust the call stack used to raise a bare RangeError and lose the whole
+ * file, and an inbox tree with a symlink loop used to walk forever.
+ */
+export const MAX_CONVERSATION_NODES = 200_000;
+export const MAX_INGEST_DEPTH = 32;
+export const MAX_INGEST_FILES = 50_000;
 
 export type IngestDocumentKind = "text" | "json" | "conversation";
 
@@ -11,6 +24,8 @@ export interface IngestDocument {
   title: string;
   body: string;
   kind: IngestDocumentKind;
+  /** Nodes dropped because the document hit MAX_CONVERSATION_NODES. */
+  truncated?: number;
 }
 
 export interface IngestedSource {
@@ -29,6 +44,10 @@ export interface IngestReport {
   failures: IngestFailure[];
   ignored: string[];
   inbox_cleared: number;
+  /** Conversation nodes dropped because a document hit the traversal bound. */
+  truncated: number;
+  /** One line per bound that bit, so a partial import is never silent. */
+  notices: string[];
 }
 
 export interface IngestOptions {
@@ -96,7 +115,17 @@ function childIds(node: JsonRecord): string[] {
     : [];
 }
 
-function transcriptFromMapping(mapping: JsonRecord): string {
+/**
+ * Walks the conversation graph with an explicit stack rather than recursion. A
+ * chain of tens of thousands of nodes overflows the V8 call stack, and the
+ * RangeError that follows used to discard the entire file. A stack has no such
+ * ceiling, and the node bound turns an unbounded document into a partial import
+ * that says how much it left behind.
+ */
+function transcriptFromMapping(
+  mapping: JsonRecord,
+  maxNodes: number,
+): { text: string; truncated: number } {
   const referenced = new Set<string>();
   for (const node of Object.values(mapping)) {
     if (isRecord(node)) {
@@ -106,38 +135,49 @@ function transcriptFromMapping(mapping: JsonRecord): string {
     }
   }
 
-  const roots = Object.keys(mapping)
-    .filter((id) => !referenced.has(id))
-    .sort();
+  const ids = Object.keys(mapping).sort();
+  const roots = ids.filter((id) => !referenced.has(id));
   const visited = new Set<string>();
   const parts: string[] = [];
+  let capped = false;
 
-  const visit = (id: string): void => {
-    if (visited.has(id)) {
-      return;
+  for (const start of [...roots, ...ids]) {
+    if (capped) {
+      break;
     }
-    visited.add(id);
-    const node = mapping[id];
-    if (!isRecord(node)) {
-      return;
+    const stack = [start];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (id === undefined || visited.has(id)) {
+        continue;
+      }
+      if (visited.size >= maxNodes) {
+        capped = true;
+        break;
+      }
+      visited.add(id);
+      const node = mapping[id];
+      if (!isRecord(node)) {
+        continue;
+      }
+      const text = conversationNodeText(node);
+      if (text) {
+        parts.push(text);
+      }
+      const children = childIds(node);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (child !== undefined) {
+          stack.push(child);
+        }
+      }
     }
-    const text = conversationNodeText(node);
-    if (text) {
-      parts.push(text);
-    }
-    for (const child of childIds(node)) {
-      visit(child);
-    }
+  }
+
+  return {
+    text: parts.join("\n\n"),
+    truncated: capped ? ids.filter((id) => !visited.has(id)).length : 0,
   };
-
-  for (const root of roots) {
-    visit(root);
-  }
-  for (const id of Object.keys(mapping).sort()) {
-    visit(id);
-  }
-
-  return parts.join("\n\n");
 }
 
 function conversationObjects(value: unknown): JsonRecord[] {
@@ -160,20 +200,30 @@ function conversationObjects(value: unknown): JsonRecord[] {
  * Traverses the public ChatGPT export mapping shape without retaining provider
  * metadata beyond the readable message sequence.
  */
-export function extractChatGptConversations(value: unknown): IngestDocument[] {
+export interface ConversationExtractOptions {
+  /** Traversal bound. Defaults to MAX_CONVERSATION_NODES. */
+  maxNodes?: number;
+}
+
+export function extractChatGptConversations(
+  value: unknown,
+  options: ConversationExtractOptions = {},
+): IngestDocument[] {
+  const maxNodes = options.maxNodes ?? MAX_CONVERSATION_NODES;
   return conversationObjects(value)
     .flatMap((conversation, index): IngestDocument[] => {
       if (!isRecord(conversation.mapping)) {
         return [];
       }
-      const body = transcriptFromMapping(conversation.mapping);
-      if (!body) {
+      const transcript = transcriptFromMapping(conversation.mapping, maxNodes);
+      if (!transcript.text) {
         return [];
       }
       return [{
         title: nonEmptyString(conversation.title) ?? `Conversation ${index + 1}`,
-        body,
+        body: transcript.text,
         kind: "conversation",
+        ...(transcript.truncated > 0 ? { truncated: transcript.truncated } : {}),
       }];
     });
 }
@@ -233,30 +283,96 @@ function renderBrief(
   ].join("\n");
 }
 
-async function writeAtomically(path: string, content: Uint8Array | string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+/**
+ * Byte-mode twin of atomicWriteText, for the raw source archive. The shared
+ * helper takes UTF-8 text, and an imported file must be archived byte for byte:
+ * re-encoding it would corrupt anything that is not valid UTF-8. The publication
+ * sequence is identical: same-directory temp file, flush, rename, flush parent.
+ */
+async function atomicWriteBytes(path: string, content: Uint8Array): Promise<void> {
+  const directory = dirname(path);
+  await mkdir(directory, { recursive: true });
+  const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
   try {
-    await writeFile(temporaryPath, content);
+    const handle = await open(temporaryPath, "wx");
+    try {
+      await handle.writeFile(content);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await rename(temporaryPath, path);
-  } finally {
+  } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);
+    throw error;
   }
+  await fsyncDirectory(directory);
 }
 
-async function inboxFiles(root: string): Promise<string[]> {
+/**
+ * Lists the inbox with a depth bound, a file bound, and a real-path guard.
+ * The inbox is the one directory whose contents come from outside, so a symlink
+ * loop, a link out of the vault, or a pathological tree must all be refused
+ * loudly instead of walked.
+ */
+async function inboxFiles(
+  inboxRoot: string,
+  vaultRealPath: string,
+  current: string = inboxRoot,
+  depth = 0,
+  visited: Set<string> = new Set(),
+  files: string[] = [],
+): Promise<string[]> {
+  if (depth > MAX_INGEST_DEPTH) {
+    throw new ExpectedError(
+      `The inbox nests deeper than ${String(MAX_INGEST_DEPTH)} directories at ${relative(inboxRoot, current)}. Flatten it, then run ingest again.`,
+    );
+  }
+
+  let currentReal: string;
+  try {
+    currentReal = await realpath(current);
+  } catch {
+    return files;
+  }
+  if (visited.has(currentReal) || !isInsideVault(vaultRealPath, currentReal)) {
+    return files;
+  }
+  visited.add(currentReal);
+
   let entries;
   try {
-    entries = await readdir(root, { withFileTypes: true });
+    entries = await readdir(current, { withFileTypes: true });
   } catch {
-    return [];
+    return files;
   }
-  const files: string[] = [];
+
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...await inboxFiles(path));
-    } else if (entry.isFile()) {
+    const path = join(current, entry.name);
+    let entryIsDirectory = entry.isDirectory();
+    let entryIsFile = entry.isFile();
+    if (entry.isSymbolicLink()) {
+      // Same policy as the scan: a link that resolves outside the vault is
+      // refused, and a link inside it is followed like any other entry.
+      const target = await realpath(path).catch(() => undefined);
+      if (target === undefined || !isInsideVault(vaultRealPath, target)) {
+        continue;
+      }
+      const resolved = await stat(path).catch(() => undefined);
+      if (resolved === undefined) {
+        continue;
+      }
+      entryIsDirectory = resolved.isDirectory();
+      entryIsFile = resolved.isFile();
+    }
+    if (entryIsDirectory) {
+      await inboxFiles(inboxRoot, vaultRealPath, path, depth + 1, visited, files);
+    } else if (entryIsFile) {
+      if (files.length >= MAX_INGEST_FILES) {
+        throw new ExpectedError(
+          `The inbox holds more than ${String(MAX_INGEST_FILES)} files. Import it in smaller batches.`,
+        );
+      }
       files.push(path);
     }
   }
@@ -280,9 +396,12 @@ export async function ingestInbox(
     failures: [],
     ignored: [],
     inbox_cleared: 0,
+    truncated: 0,
+    notices: [],
   };
+  const vaultRealPath = await realpath(root).catch(() => root);
 
-  for (const sourcePath of await inboxFiles(inboxRoot)) {
+  for (const sourcePath of await inboxFiles(inboxRoot, vaultRealPath)) {
     const relativeSourcePath = toPosixPath(relative(inboxRoot, sourcePath));
     const extension = extname(sourcePath).toLowerCase();
     if (![".txt", ".md", ".markdown", ".json"].includes(extension)) {
@@ -305,7 +424,7 @@ export async function ingestInbox(
         batch,
         relativeSourcePath,
       ));
-      await writeAtomically(join(root, archiveRelativePath), bytes);
+      await atomicWriteBytes(join(root, archiveRelativePath), bytes);
 
       const sourceStem = safeName(basename(sourcePath, extension));
       const sourceFingerprint = sha256(relativeSourcePath).slice(0, 12);
@@ -318,11 +437,17 @@ export async function ingestInbox(
           batch,
           `${sourceStem}-${sourceFingerprint}${suffix}.brief.md`,
         ));
-        await writeAtomically(
+        await atomicWriteText(
           join(root, briefRelativePath),
           renderBrief(document, archiveRelativePath, now),
         );
         briefPaths.push(briefRelativePath);
+        if (document.truncated !== undefined && document.truncated > 0) {
+          report.truncated += document.truncated;
+          report.notices.push(
+            `${relativeSourcePath}: conversation "${document.title}" exceeds the supported node limit (${String(MAX_CONVERSATION_NODES)}). The first ${String(MAX_CONVERSATION_NODES)} nodes were imported; ${String(document.truncated)} were skipped.`,
+          );
+        }
       }
 
       await unlink(sourcePath);

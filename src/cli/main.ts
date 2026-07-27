@@ -3,7 +3,6 @@ import { defineCommand, runCommand, runMain } from "citty";
 import { join, resolve } from "node:path";
 
 import { loadCatalog } from "../core/catalog.js";
-import { loadConfigResult } from "../core/config.js";
 import { ExpectedError } from "../core/errors.js";
 import {
   applyReviewedGcProposal,
@@ -15,30 +14,37 @@ import {
 import { buildGraph } from "../core/graph.js";
 import { checkVaultHealth } from "../core/health.js";
 import { ingestInbox } from "../core/ingest.js";
-import { writeIndexArtifacts } from "../core/index-writer.js";
 import { loadRouting, routeVault, suggestRoutes } from "../core/route.js";
-import { scanVault } from "../core/scan.js";
+import { runVaultScan } from "../core/scan.js";
 import { applySkin, type SkinName } from "../core/skin.js";
 import { getVaultStatus } from "../core/status.js";
-import type { VaultConfig } from "../core/types.js";
 import {
-  addPreference,
   isLedgerDate,
   isPreferenceStatus,
   isPreferenceWeight,
   listPreferences,
   loadPreferenceLedger,
-  logPreference,
   PREFERENCE_CORE_RELATIVE_PATH,
   PREFERENCE_LEDGER_RELATIVE_PATH,
-  savePreferenceLedger,
-  shouldAutoRegen,
-  syncPreferenceMirrors,
+  regeneratePreferenceOutputs,
+  runPreferenceOperation,
   validatePreferenceLedger,
-  writePreferenceCore,
+  withPreferenceLock,
   type PreferenceStatus,
   type PreferenceWeight,
 } from "../prefs/index.js";
+import { capabilitiesCommand } from "./commands/capabilities.js";
+import { captureCommand } from "./commands/capture.js";
+import { classifyCommand } from "./commands/classify.js";
+import { guardCommand } from "./commands/guard.js";
+import { hookCommand } from "./commands/hook.js";
+import { hooksCommand } from "./commands/hooks.js";
+import { learnCommand } from "./commands/learn.js";
+import { onboardingCommand } from "./commands/onboarding.js";
+import { parityCommand } from "./commands/parity.js";
+import { stagingCommand } from "./commands/staging.js";
+import { syncCommand } from "./commands/sync.js";
+import { transcriptsCommand } from "./commands/transcripts.js";
 import {
   checkIdeaInVault,
   dismissIdeaInVault,
@@ -54,45 +60,18 @@ import {
   writeJsonFile,
 } from "./vault.js";
 import { syncLoadersFromConfig } from "../loaders/index.js";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function argument(args: unknown, name: string): unknown {
-  return isRecord(args) ? args[name] : undefined;
-}
-
-function optionalString(args: unknown, name: string): string | undefined {
-  const value = argument(args, name);
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function booleanArgument(args: unknown, name: string): boolean {
-  return argument(args, name) === true;
-}
-
-function requiredString(args: unknown, name: string): string {
-  const value = optionalString(args, name);
-  if (!value) {
-    throw new Error(`--${name} requires a non-empty value.`);
-  }
-  return value;
-}
-
-function optionalNonNegativeInteger(
-  args: unknown,
-  name: string,
-): number | undefined {
-  const value = optionalString(args, name);
-  if (value === undefined) {
-    return undefined;
-  }
-  if (!/^\d+$/u.test(value)) {
-    throw new Error(`--${name} must be a non-negative integer.`);
-  }
-  return Number(value);
-}
+import {
+  booleanArgument,
+  isRecord,
+  loadConfigForCli,
+  optionalBoolean,
+  optionalNonNegativeInteger,
+  optionalString,
+  printJson,
+  printNotice,
+  requiredString,
+  rootArgument,
+} from "./shared.js";
 
 function optionalPreferenceWeight(
   args: unknown,
@@ -142,36 +121,12 @@ function optionalLedgerDate(args: unknown, name: string): string | undefined {
   return value;
 }
 
-// Tri-state boolean: --core => true, --no-core => false, absent => undefined.
-function optionalBoolean(args: unknown, name: string): boolean | undefined {
-  const value = argument(args, name);
-  return typeof value === "boolean" ? value : undefined;
-}
-
 function requiredSkinName(args: unknown): SkinName {
   const skin = requiredString(args, "skin");
   if (skin !== "universal" && skin !== "brain") {
     throw new Error("skin must be either universal or brain.");
   }
   return skin;
-}
-
-function printJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-}
-
-function printNotice(message: string): void {
-  process.stdout.write(`${pc.cyan(message)}\n`);
-}
-
-// Loads config for a command and warns once on stderr when the config file
-// exists but is unreadable or malformed, without changing the exit code.
-async function loadConfigForCli(root: string): Promise<VaultConfig> {
-  const { config, issue } = await loadConfigResult(root);
-  if (issue) {
-    process.stderr.write(`${pc.yellow("WARNING")} ${issue.message}\n`);
-  }
-  return config;
 }
 
 function isGcCandidate(value: unknown): boolean {
@@ -219,13 +174,6 @@ async function readGcProposal(path: string): Promise<GcProposal> {
   }
   return value;
 }
-
-const rootArgument = {
-  root: {
-    type: "string",
-    description: "Vault root or a path inside an existing vault.",
-  },
-} as const;
 
 const initCommand = defineCommand({
   meta: {
@@ -297,6 +245,22 @@ const doctorCommand = defineCommand({
       printNotice("Run `open-brain doctor --repair` to repair only safe generated wiring.");
       process.exitCode = 2;
     }
+    if (result.redline.tampered) {
+      printNotice(
+        "The preference kernel changed outside its recorded write paths. Review `redline` in this report before trusting it.",
+      );
+      process.exitCode = 2;
+    }
+    for (const issue of result.capabilityIssues) {
+      printNotice(issue);
+      process.exitCode = 2;
+    }
+    if (result.preferenceKernelAliases.length > 0) {
+      printNotice(
+        `${String(result.preferenceKernelAliases.length)} symlink(s) resolve to a protected preference kernel file: ${result.preferenceKernelAliases.join(", ")}. A write through one of them would not be seen as a kernel write.`,
+      );
+      process.exitCode = 2;
+    }
   },
 });
 
@@ -309,10 +273,8 @@ const scanCommand = defineCommand({
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const config = await loadConfigForCli(root);
-    const previousRecords = await loadCatalog(root, config);
-    const scan = await scanVault(root, config, { previousRecords });
-    await writeIndexArtifacts(root, config, scan);
-    printJson(scan);
+    const written = await runVaultScan(root, config);
+    printJson(written.scan);
   },
 });
 
@@ -570,28 +532,27 @@ const prefsCommand = defineCommand({
       },
       async run({ args }) {
         const root = await resolveVaultRoot(optionalString(args, "root"));
-        const ledger = await loadPreferenceLedger(root);
         const status = optionalPreferenceStatus(args, "status");
         const date = optionalLedgerDate(args, "date");
         const core = optionalBoolean(args, "core");
         const id = requiredString(args, "id");
-        const next = addPreference(ledger, {
-          id,
-          text: requiredString(args, "text"),
-          weight: requiredPreferenceWeight(args, "weight"),
-          ...(status === undefined ? {} : { status }),
-          ...(date === undefined ? {} : { date }),
-          ...(core === undefined ? {} : { core }),
-        });
-        await savePreferenceLedger(root, next);
-        const preference = next.preferences.find((item) => item.id === id);
-        let regenerated = false;
-        if (preference && shouldAutoRegen(preference)) {
-          await writePreferenceCore(root, next);
-          await syncPreferenceMirrors(root, next);
-          regenerated = true;
+        const result = await runPreferenceOperation(
+          root,
+          {
+            kind: "add",
+            id,
+            text: requiredString(args, "text"),
+            weight: requiredPreferenceWeight(args, "weight"),
+            ...(status === undefined ? {} : { status }),
+            ...(date === undefined ? {} : { date }),
+            ...(core === undefined ? {} : { core }),
+          },
+          { command: "prefs add" },
+        );
+        if (result.outcome.kind === "conflict") {
+          throw new ExpectedError(result.outcome.detail);
         }
-        printJson({ preference, regenerated });
+        printJson({ preference: result.preference, regenerated: result.regenerated });
       },
     }),
     list: defineCommand({
@@ -647,9 +608,10 @@ const prefsCommand = defineCommand({
       args: rootArgument,
       async run({ args }) {
         const root = await resolveVaultRoot(optionalString(args, "root"));
-        const ledger = await loadPreferenceLedger(root);
-        await writePreferenceCore(root, ledger);
-        const mirrors = await syncPreferenceMirrors(root, ledger);
+        const mirrors = await withPreferenceLock(root, async () => {
+          const ledger = await loadPreferenceLedger(root);
+          return regeneratePreferenceOutputs(root, ledger, { command: "prefs regen" });
+        });
         printJson({
           core_path: PREFERENCE_CORE_RELATIVE_PATH,
           loader_mirrors: mirrors,
@@ -696,29 +658,29 @@ const prefsCommand = defineCommand({
       },
       async run({ args }) {
         const root = await resolveVaultRoot(optionalString(args, "root"));
-        const ledger = await loadPreferenceLedger(root);
         const id = requiredString(args, "id");
         const signal = requiredString(args, "signal");
         const weight = optionalPreferenceWeight(args, "weight");
         const status = optionalPreferenceStatus(args, "status");
         const date = optionalLedgerDate(args, "date");
         const quote = optionalString(args, "quote");
-        const next = logPreference(ledger, id, {
-          signal,
-          ...(weight === undefined ? {} : { weight }),
-          ...(status === undefined ? {} : { status }),
-          ...(date === undefined ? {} : { date }),
-          ...(quote === undefined ? {} : { quote }),
-        });
-        await savePreferenceLedger(root, next);
-        const preference = next.preferences.find((item) => item.id === id);
-        let regenerated = false;
-        if (preference && shouldAutoRegen(preference)) {
-          await writePreferenceCore(root, next);
-          await syncPreferenceMirrors(root, next);
-          regenerated = true;
+        const result = await runPreferenceOperation(
+          root,
+          {
+            kind: "log",
+            id,
+            signal,
+            ...(weight === undefined ? {} : { weight }),
+            ...(status === undefined ? {} : { status }),
+            ...(date === undefined ? {} : { date }),
+            ...(quote === undefined ? {} : { quote }),
+          },
+          { command: "prefs log" },
+        );
+        if (result.outcome.kind === "conflict") {
+          throw new ExpectedError(result.outcome.detail);
         }
-        printJson({ preference, regenerated });
+        printJson({ preference: result.preference, regenerated: result.regenerated });
       },
     }),
   },
@@ -753,9 +715,7 @@ const skinCommand = defineCommand({
     let rescanned = false;
     if (!dryRun && result.rescan_required) {
       const updatedConfig = await loadConfigForCli(root);
-      const previousRecords = await loadCatalog(root, updatedConfig);
-      const scan = await scanVault(root, updatedConfig, { previousRecords });
-      await writeIndexArtifacts(root, updatedConfig, scan);
+      await runVaultScan(root, updatedConfig);
       rescanned = true;
     }
 
@@ -878,6 +838,18 @@ const main = defineCommand({
     ingest: ingestCommand,
     prefs: prefsCommand,
     skin: skinCommand,
+    hook: hookCommand,
+    hooks: hooksCommand,
+    staging: stagingCommand,
+    guard: guardCommand,
+    sync: syncCommand,
+    classify: classifyCommand,
+    transcripts: transcriptsCommand,
+    capture: captureCommand,
+    onboarding: onboardingCommand,
+    capabilities: capabilitiesCommand,
+    learn: learnCommand,
+    parity: parityCommand,
   },
 });
 
@@ -909,9 +881,15 @@ function printExpectedError(message: string): void {
 // keep their stack.
 async function runCli(rawArgs: string[]): Promise<void> {
   const wantsHelp = rawArgs.includes("--help") || rawArgs.includes("-h");
-  const wantsVersion = rawArgs.length === 1 && rawArgs[0] === "--version";
-  if (wantsHelp || wantsVersion) {
+  if (wantsHelp) {
     await runMain(main, { rawArgs });
+    return;
+  }
+  // --version answers the same question wherever it appears, at the top level
+  // or on any subcommand, so it is handled once here rather than left to
+  // citty, which only recognizes it on the command actually being run.
+  if (rawArgs.includes("--version")) {
+    process.stdout.write(`${ENGINE_VERSION}\n`);
     return;
   }
   try {

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { toPosixPath } from "./text.js";
@@ -9,6 +9,44 @@ import type { Lifecycle, ThermalTier, VaultConfig } from "./types.js";
 const execFileAsync = promisify(execFile);
 const DAY_MS = 86_400_000;
 const FILENAME_DATE = /(20\d{2})-(\d{2})-(\d{2})/u;
+
+/** Total wall clock a scan may spend reading git history, across all commands. */
+export const GIT_HISTORY_TIMEOUT_MS = 15_000;
+
+const GIT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
+// A repository slow enough to exhaust the budget would otherwise pay the full
+// budget again on every call within the same process.
+const gitTimesCache = new Map<string, Map<string, number>>();
+
+/** Clears the per-process git history cache. Tests and long-lived hosts use it. */
+export function clearGitContentTimesCache(): void {
+  gitTimesCache.clear();
+}
+
+function monotonicMs(): number {
+  return Number(process.hrtime.bigint() / 1_000_000n);
+}
+
+/**
+ * A shared budget, not a per-command timeout. The second git call only gets
+ * whatever the first one left, and once the budget is gone the call is refused
+ * before it starts rather than started with a timeout of zero.
+ */
+function remainingGitBudget(deadlineMs: number, command: readonly string[]): number {
+  const remaining = deadlineMs - monotonicMs();
+  if (remaining <= 0) {
+    throw new Error(`git history budget exhausted before running: git ${command.join(" ")}`);
+  }
+  return remaining;
+}
+
+export interface GitContentTimesOptions {
+  /** Shared budget in milliseconds. Defaults to GIT_HISTORY_TIMEOUT_MS. */
+  timeoutMs?: number;
+  /** Set to false to bypass the per-process cache. */
+  cache?: boolean;
+}
 
 export function filenameDateTimestamp(relativePath: string): number | undefined {
   const match = FILENAME_DATE.exec(basename(relativePath));
@@ -37,13 +75,47 @@ function resolveRename(path: string, forward: Map<string, string>): string {
   return current;
 }
 
-export async function gitContentTimes(root: string): Promise<Map<string, number>> {
+/**
+ * Reads the git content timestamps of a repository under a bounded budget.
+ *
+ * A slow or wedged repository must never stall a scan. When the budget runs out
+ * the partial map is dropped rather than returned: a rename map without the
+ * timestamps it resolves would age documents wrongly, which is worse than having
+ * no git signal at all. The caller then falls back to file mtimes, which is a
+ * degraded but honest answer, and never an exception.
+ */
+export async function gitContentTimes(
+  root: string,
+  options: GitContentTimesOptions = {},
+): Promise<Map<string, number>> {
+  const useCache = options.cache !== false;
+  const cacheKey = resolve(root);
+  if (useCache) {
+    const cached = gitTimesCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const deadline = monotonicMs() + (options.timeoutMs ?? GIT_HISTORY_TIMEOUT_MS);
+  const times = await readGitContentTimes(root, deadline);
+  if (useCache) {
+    gitTimesCache.set(cacheKey, times);
+  }
+  return times;
+}
+
+async function readGitContentTimes(
+  root: string,
+  deadline: number,
+): Promise<Map<string, number>> {
   try {
-    const renameResult = await execFileAsync(
-      "git",
-      ["-C", root, "log", "-M", "--format=", "--name-status", "--diff-filter=R"],
-      { maxBuffer: 16 * 1024 * 1024 },
-    );
+    const renameArgs = ["-C", root, "log", "-M", "--format=", "--name-status", "--diff-filter=R"];
+    const renameResult = await execFileAsync("git", renameArgs, {
+      maxBuffer: GIT_MAX_BUFFER_BYTES,
+      timeout: remainingGitBudget(deadline, renameArgs),
+      killSignal: "SIGKILL",
+    });
     const forward = new Map<string, string>();
     for (const line of renameResult.stdout.split(/\r?\n/u)) {
       if (!line.startsWith("R")) {
@@ -57,11 +129,12 @@ export async function gitContentTimes(root: string): Promise<Map<string, number>
       }
     }
 
-    const contentResult = await execFileAsync(
-      "git",
-      ["-C", root, "log", "-M", "--format=C%at", "--name-status", "--diff-filter=ACM"],
-      { maxBuffer: 16 * 1024 * 1024 },
-    );
+    const contentArgs = ["-C", root, "log", "-M", "--format=C%at", "--name-status", "--diff-filter=ACM"];
+    const contentResult = await execFileAsync("git", contentArgs, {
+      maxBuffer: GIT_MAX_BUFFER_BYTES,
+      timeout: remainingGitBudget(deadline, contentArgs),
+      killSignal: "SIGKILL",
+    });
     const times = new Map<string, number>();
     let currentTimestamp: number | undefined;
     for (const line of contentResult.stdout.split(/\r?\n/u)) {

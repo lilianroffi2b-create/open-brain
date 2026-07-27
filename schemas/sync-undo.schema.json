@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/sync-undo.schema.json",
+  "title": "OpenBrain Sync Undo Record",
+  "description": "Written as <batch_id>.undo.json under 10_memory/staging/batches/ before the first destination of an approved batch is written. It carries the whole prior content of every target the batch will touch, byte for byte, which is what lets `open-brain sync undo` restore the vault exactly as it was before the batch was applied. Immutable once written: a resume reuses the original record instead of snapshotting a half-applied vault.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "batch_id", "recorded_at", "approved_indices", "targets"],
+  "properties": {
+    "schema": { "const": "open-brain/sync-undo/v1" },
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "batch_id": { "type": "string", "pattern": "^batch-[0-9a-f]{24}$" },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "approved_indices": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 1 }
+    },
+    "targets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/targetSnapshot" }
+    }
+  },
+  "$defs": {
+    "targetSnapshot": {
+      "title": "State of one file before the batch touched it",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "existed", "sha256", "bytes", "content"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["preference_ledger", "preference_core", "loader_mirror", "memory_note"]
+        },
+        "path": {
+          "type": "string",
+          "description": "Vault-relative path of the target."
+        },
+        "existed": {
+          "type": "boolean",
+          "description": "Whether the target existed on disk before the batch."
+        },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Null exactly when existed is false."
+        },
+        "bytes": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Null exactly when existed is false."
+        },
+        "content": {
+          "type": ["string", "null"],
+          "description": "The whole file content before the batch, kept whole so undo can restore it. Null exactly when existed is false."
+        }
+      }
+    }
+  }
+}

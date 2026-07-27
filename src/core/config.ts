@@ -2,7 +2,16 @@ import { access, readdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-import type { PalierConfig, VaultConfig } from "./types.js";
+import type {
+  CapabilitiesConfig,
+  CaptureMarkerPackConfig,
+  CaptureTuningConfig,
+  ClassifierProvider,
+  LearningTuningConfig,
+  PalierConfig,
+  StagingTuningConfig,
+  VaultConfig,
+} from "./types.js";
 
 export const VAULT_CONFIG_RELATIVE_PATH = "00_index/vault.config.yml";
 const VAULT_CONFIG_FILENAME = "vault.config.yml";
@@ -28,6 +37,8 @@ export const DEFAULT_CONFIG: VaultConfig = {
     sources: "40_sources",
     outputs: "50_outputs",
     engine: "70_engine",
+    staging: "10_memory/staging",
+    notes: "10_memory/notes",
   },
   exclusions: [
     ".git",
@@ -38,6 +49,10 @@ export const DEFAULT_CONFIG: VaultConfig = {
     "coverage",
     ".open-brain",
     "70_engine",
+    // Lock files live under <index>/.locks. The scan already skips the
+    // literal path 00_index/.locks, but that check does not follow a skin
+    // that renames the index directory; this segment-based exclusion does.
+    ".locks",
   ],
   text_extensions: [
     ".md",
@@ -90,6 +105,89 @@ export const DEFAULT_CONFIG: VaultConfig = {
     active_paths: [],
     active_dir_prefixes: [],
   },
+  capabilities: {
+    hooks: {
+      enabled: false,
+      targets: [],
+      // Mirrors DEFAULT_HOOK_BUDGET_MS in src/hooks/runtime.ts. Duplicated
+      // rather than imported: core must not depend on the hooks layer.
+      budget_ms: 2_000,
+    },
+    capture: {
+      enabled: false,
+    },
+    transcripts: {
+      enabled: false,
+      roots: [],
+      redact: true,
+    },
+    classifier: {
+      enabled: false,
+      provider: "none",
+      daily_call_budget: 25,
+    },
+    learning: {
+      enabled: false,
+      evaluate: false,
+      consolidate: false,
+    },
+  },
+  // staging.max_chars, capture.*, and learning.* below are configuration
+  // surface only: they read tolerantly like every other section, but their
+  // current readers (src/staging/markers.ts, src/learning/sensors/index.ts)
+  // still re-parse vault.config.yml directly rather than reading VaultConfig.
+  // The defaults here mirror those readers' own defaults so the two never
+  // silently disagree.
+  staging: {
+    max_chars: 4_000,
+  },
+  capture: {
+    markers: {
+      packs: ["en"],
+      custom: [],
+      limits: {
+        max_correction_chars: 1_200,
+        negation_window_chars: 12,
+        meta_window_chars: 24,
+        max_markers_per_message: 8,
+      },
+    },
+    limits: {
+      max_messages_per_scan: 40,
+      max_candidates_per_scan: 10,
+      transcript_max_bytes: 512_000,
+      transcript_max_lines: 4_000,
+    },
+  },
+  learning: {
+    // Mirrors DEFAULT_HISTORY_POLICY in src/learning/types.ts.
+    history: {
+      max_entries: 200,
+    },
+    // Mirrors DEFAULT_LEARNING_TUNING in src/learning/sensors/index.ts.
+    sensors: {
+      circulation: {
+        read_tools: ["Read", "NotebookRead"],
+        write_tools: ["Write", "Edit", "NotebookEdit"],
+        max_partitions: 2,
+        max_entries: 2_000,
+      },
+    },
+    evaluator: {
+      correction_window_turns: 2,
+      confirmation_window_turns: 3,
+      dead_output_days: 7,
+      rapid_followup_seconds: 120,
+      session_closed_hours: 12,
+    },
+    injection: {
+      max_chars: 1_500,
+      max_law: 1,
+      max_active: 1,
+      statement_clip: 160,
+      drift_alert_tokens: 350,
+    },
+  },
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -139,10 +237,243 @@ function asStringArray(value: unknown, fallback: string[]): string[] {
   return [...new Set(value.map((item) => item.trim()).filter(Boolean))];
 }
 
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
 function asTier(value: unknown, fallback: PalierConfig["shard_from"]): PalierConfig["shard_from"] {
   return value === "P1" || value === "P2" || value === "P3" || value === "P4"
     ? value
     : fallback;
+}
+
+function asClassifierProvider(
+  value: unknown,
+  fallback: ClassifierProvider,
+): ClassifierProvider {
+  return value === "none" || value === "claude-code-subagent" ? value : fallback;
+}
+
+function asSection(value: unknown): UnknownRecord {
+  return isRecord(value) ? value : {};
+}
+
+/**
+ * Capabilities are read against the disarmed defaults rather than merged over
+ * them: a missing section, a wrong type, or a truthy string all read as
+ * disarmed. Arming a capability therefore always requires an explicit boolean
+ * true in the config file.
+ */
+function normalizeCapabilities(value: unknown): CapabilitiesConfig {
+  const defaults = DEFAULT_CONFIG.capabilities;
+  const source = asSection(value);
+  const hooks = asSection(source.hooks);
+  const capture = asSection(source.capture);
+  const transcripts = asSection(source.transcripts);
+  const classifier = asSection(source.classifier);
+  const learning = asSection(source.learning);
+
+  return {
+    hooks: {
+      enabled: asBoolean(hooks.enabled, defaults.hooks.enabled),
+      targets: asStringArray(hooks.targets, defaults.hooks.targets),
+      budget_ms: asPositiveInteger(hooks.budget_ms, defaults.hooks.budget_ms),
+    },
+    capture: {
+      enabled: asBoolean(capture.enabled, defaults.capture.enabled),
+    },
+    transcripts: {
+      enabled: asBoolean(transcripts.enabled, defaults.transcripts.enabled),
+      roots: asStringArray(transcripts.roots, defaults.transcripts.roots),
+      redact: asBoolean(transcripts.redact, defaults.transcripts.redact),
+    },
+    classifier: {
+      enabled: asBoolean(classifier.enabled, defaults.classifier.enabled),
+      provider: asClassifierProvider(classifier.provider, defaults.classifier.provider),
+      // A value of 0 is not a way to stop the classifier: asPositiveInteger
+      // treats it as absent and falls back to the default budget. The actual
+      // switch is capabilities.classifier.enabled.
+      daily_call_budget: asPositiveInteger(
+        classifier.daily_call_budget,
+        defaults.classifier.daily_call_budget,
+      ),
+    },
+    learning: {
+      enabled: asBoolean(learning.enabled, defaults.learning.enabled),
+      evaluate: asBoolean(learning.evaluate, defaults.learning.evaluate),
+      consolidate: asBoolean(learning.consolidate, defaults.learning.consolidate),
+    },
+  };
+}
+
+function normalizeStagingTuning(value: unknown): StagingTuningConfig {
+  const defaults = DEFAULT_CONFIG.staging;
+  const source = asSection(value);
+  return {
+    max_chars: asPositiveInteger(source.max_chars, defaults.max_chars),
+  };
+}
+
+function asMarkerPackConfig(value: unknown): CaptureMarkerPackConfig | undefined {
+  const source = asSection(value);
+  const id = typeof source.id === "string" ? source.id.trim() : "";
+  if (id.length === 0) {
+    return undefined;
+  }
+  return {
+    id,
+    explicit_request: asStringArray(source.explicit_request, []),
+    correction: asStringArray(source.correction, []),
+    correction_lead: asStringArray(source.correction_lead, []),
+    praise: asStringArray(source.praise, []),
+    praise_negations: asStringArray(source.praise_negations, []),
+    praise_meta_words: asStringArray(source.praise_meta_words, []),
+  };
+}
+
+function asMarkerPackList(
+  value: unknown,
+  fallback: readonly CaptureMarkerPackConfig[],
+): CaptureMarkerPackConfig[] {
+  if (!Array.isArray(value)) {
+    return [...fallback];
+  }
+  return value
+    .map(asMarkerPackConfig)
+    .filter((pack): pack is CaptureMarkerPackConfig => pack !== undefined);
+}
+
+/**
+ * The typed configuration for capture is documentation, not yet a live source:
+ * src/staging/markers.ts re-reads vault.config.yml directly and keeps working
+ * unchanged either way. Every value here is read tolerantly, same as
+ * capabilities, so a typo degrades to the default instead of failing to load.
+ */
+function normalizeCaptureTuning(value: unknown): CaptureTuningConfig {
+  const defaults = DEFAULT_CONFIG.capture;
+  const source = asSection(value);
+  const markers = asSection(source.markers);
+  const markerLimits = asSection(markers.limits);
+  const limits = asSection(source.limits);
+
+  return {
+    markers: {
+      packs: asStringArray(markers.packs, defaults.markers.packs),
+      custom: asMarkerPackList(markers.custom, defaults.markers.custom),
+      limits: {
+        max_correction_chars: asPositiveInteger(
+          markerLimits.max_correction_chars,
+          defaults.markers.limits.max_correction_chars,
+        ),
+        negation_window_chars: asPositiveInteger(
+          markerLimits.negation_window_chars,
+          defaults.markers.limits.negation_window_chars,
+        ),
+        meta_window_chars: asPositiveInteger(
+          markerLimits.meta_window_chars,
+          defaults.markers.limits.meta_window_chars,
+        ),
+        max_markers_per_message: asPositiveInteger(
+          markerLimits.max_markers_per_message,
+          defaults.markers.limits.max_markers_per_message,
+        ),
+      },
+    },
+    limits: {
+      max_messages_per_scan: asPositiveInteger(
+        limits.max_messages_per_scan,
+        defaults.limits.max_messages_per_scan,
+      ),
+      max_candidates_per_scan: asPositiveInteger(
+        limits.max_candidates_per_scan,
+        defaults.limits.max_candidates_per_scan,
+      ),
+      transcript_max_bytes: asPositiveInteger(
+        limits.transcript_max_bytes,
+        defaults.limits.transcript_max_bytes,
+      ),
+      transcript_max_lines: asPositiveInteger(
+        limits.transcript_max_lines,
+        defaults.limits.transcript_max_lines,
+      ),
+    },
+  };
+}
+
+/**
+ * Same status as normalizeCaptureTuning: src/learning/sensors/index.ts still
+ * re-reads vault.config.yml directly for these values. This is the typed
+ * surface, not yet the live source.
+ */
+function normalizeLearningTuning(value: unknown): LearningTuningConfig {
+  const defaults = DEFAULT_CONFIG.learning;
+  const source = asSection(value);
+  const history = asSection(source.history);
+  const sensors = asSection(source.sensors);
+  const circulation = asSection(sensors.circulation);
+  const evaluator = asSection(source.evaluator);
+  const injection = asSection(source.injection);
+
+  return {
+    history: {
+      max_entries: asPositiveInteger(history.max_entries, defaults.history.max_entries),
+    },
+    sensors: {
+      circulation: {
+        read_tools: asStringArray(
+          circulation.read_tools,
+          defaults.sensors.circulation.read_tools,
+        ),
+        write_tools: asStringArray(
+          circulation.write_tools,
+          defaults.sensors.circulation.write_tools,
+        ),
+        max_partitions: asPositiveInteger(
+          circulation.max_partitions,
+          defaults.sensors.circulation.max_partitions,
+        ),
+        max_entries: asPositiveInteger(
+          circulation.max_entries,
+          defaults.sensors.circulation.max_entries,
+        ),
+      },
+    },
+    evaluator: {
+      correction_window_turns: asPositiveInteger(
+        evaluator.correction_window_turns,
+        defaults.evaluator.correction_window_turns,
+      ),
+      confirmation_window_turns: asPositiveInteger(
+        evaluator.confirmation_window_turns,
+        defaults.evaluator.confirmation_window_turns,
+      ),
+      dead_output_days: asPositiveInteger(
+        evaluator.dead_output_days,
+        defaults.evaluator.dead_output_days,
+      ),
+      rapid_followup_seconds: asPositiveInteger(
+        evaluator.rapid_followup_seconds,
+        defaults.evaluator.rapid_followup_seconds,
+      ),
+      session_closed_hours: asPositiveInteger(
+        evaluator.session_closed_hours,
+        defaults.evaluator.session_closed_hours,
+      ),
+    },
+    injection: {
+      max_chars: asPositiveInteger(injection.max_chars, defaults.injection.max_chars),
+      max_law: asPositiveInteger(injection.max_law, defaults.injection.max_law),
+      max_active: asPositiveInteger(injection.max_active, defaults.injection.max_active),
+      statement_clip: asPositiveInteger(
+        injection.statement_clip,
+        defaults.injection.statement_clip,
+      ),
+      drift_alert_tokens: asPositiveInteger(
+        injection.drift_alert_tokens,
+        defaults.injection.drift_alert_tokens,
+      ),
+    },
+  };
 }
 
 function normalizeConfig(value: VaultConfig): VaultConfig {
@@ -207,6 +538,10 @@ function normalizeConfig(value: VaultConfig): VaultConfig {
     config.activity.active_dir_prefixes,
     DEFAULT_CONFIG.activity.active_dir_prefixes,
   );
+  config.capabilities = normalizeCapabilities(config.capabilities);
+  config.staging = normalizeStagingTuning(config.staging);
+  config.capture = normalizeCaptureTuning(config.capture);
+  config.learning = normalizeLearningTuning(config.learning);
   return config;
 }
 

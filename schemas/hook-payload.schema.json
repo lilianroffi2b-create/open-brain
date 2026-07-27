@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/hook-payload.schema.json",
+  "title": "OpenBrain Hook Payload",
+  "description": "The JSON object a host CLI writes to the standard input of `open-brain hook <event>`. Every field is optional: the payload is written by another program, and a hook that requires a field is a hook that breaks a session when the host changes. Unknown fields are ignored, never rejected.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "cwd": {
+      "type": "string",
+      "description": "Working directory of the host. The primary signal used to locate the vault, and the only one both hosts provide."
+    },
+    "hook_event_name": {
+      "type": "string",
+      "description": "Host name of the event that fired.",
+      "enum": [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "PreCompact"
+      ]
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Identifier of the session."
+    },
+    "transcript_path": {
+      "type": "string",
+      "description": "Absolute path to the session transcript. Open Brain reads it only when the transcripts capability is armed for a directory that contains it."
+    },
+    "permission_mode": {
+      "type": "string",
+      "description": "Permission mode of the host. In plan mode every hook that could write, warn, or refuse stays inert.",
+      "enum": ["default", "acceptEdits", "dontAsk", "bypassPermissions", "plan"]
+    },
+    "prompt": {
+      "type": "string",
+      "description": "UserPromptSubmit only. The raw text the user submitted."
+    },
+    "source": {
+      "type": "string",
+      "description": "SessionStart only. Why the session started.",
+      "enum": ["startup", "resume", "clear", "compact"]
+    },
+    "tool_name": {
+      "type": "string",
+      "description": "PreToolUse and PostToolUse. Write, Edit, Bash, Read on Claude Code; apply_patch, exec, exec_command on Codex."
+    },
+    "tool_input": {
+      "type": "object",
+      "description": "PreToolUse and PostToolUse. Arguments of the tool call. Its shape depends on the tool.",
+      "additionalProperties": true,
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Write and Edit. Target file. `path` is accepted as a fallback."
+        },
+        "path": {
+          "type": "string",
+          "description": "Fallback spelling of file_path."
+        },
+        "content": {
+          "type": "string",
+          "description": "Write. The full content written."
+        },
+        "new_string": {
+          "type": "string",
+          "description": "Edit. The added text. old_string is never read."
+        },
+        "command": {
+          "description": "Bash, exec, exec_command, and apply_patch. A shell command as a single string, or, on Codex, an argument vector. Both forms are normalized to one string.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "patch": {
+          "type": "string",
+          "description": "apply_patch. The textual patch, when it is not passed as the command."
+        }
+      }
+    },
+    "tool_response": {
+      "type": "object",
+      "description": "PostToolUse only. Result of the tool call.",
+      "additionalProperties": true
+    },
+    "stop_hook_active": {
+      "type": "boolean",
+      "description": "Stop only. True when the assistant is already continuing because of an earlier stop block. The stop hook never blocks again while this is true, because that is how a hook becomes an infinite loop."
+    },
+    "trigger": {
+      "type": "string",
+      "description": "PreCompact only. Whether compaction was automatic or asked for.",
+      "enum": ["auto", "manual"]
+    },
+    "turn_id": {
+      "type": "string",
+      "description": "Codex only. Identifier of the current turn, and therefore the harness discriminant: Claude Code never sends it. A payload carrying a non-empty turn_id of at most 256 characters with no space is treated as a Codex payload.",
+      "maxLength": 256
+    },
+    "model": {
+      "type": "string",
+      "description": "Identifier of the model. Present on some hosts, read by nothing."
+    }
+  }
+}

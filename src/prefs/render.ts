@@ -2,14 +2,27 @@ import { getCorePreferences } from "./ledger.js";
 import type { Preference, PreferenceLedger } from "./types.js";
 import { assertValidPreferenceLedger } from "./validation.js";
 
+/**
+ * The always-on core is paid in tokens on every session, so a line only earns
+ * its place when it carries something the lines above do not. "why" is rendered
+ * only when it differs from the statement: a preference created from a single
+ * sentence has why, apply, and statement all equal to that sentence, and
+ * printing it three times would cost context for no information. A preference
+ * that came through the review gate carries a distinct rationale, and that one
+ * is worth the room because it lets a model apply the rule to a case nobody
+ * wrote down.
+ */
 function renderPreference(preference: Preference): string[] {
   const domains = preference.domains.join(", ");
-  return [
+  const lines = [
     `## [w${preference.weight}] ${preference.id} (${domains})`,
     preference.statement,
-    `_Apply:_ ${preference.apply}`,
-    "",
   ];
+  if (preference.why.trim() !== preference.statement.trim()) {
+    lines.push(`_Why:_ ${preference.why}`);
+  }
+  lines.push(`_Apply:_ ${preference.apply}`, "");
+  return lines;
 }
 
 /** Deterministically renders the always-on core from active core preferences. */

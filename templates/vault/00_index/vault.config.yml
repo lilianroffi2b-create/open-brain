@@ -19,6 +19,8 @@ paths:
   sources: 40_sources
   outputs: 50_outputs
   engine: 70_engine
+  staging: 10_memory/staging
+  notes: 10_memory/notes
 
 exclusions:
   - .git
@@ -86,3 +88,94 @@ interaction:
   # Off is the safe default when onboarding is skipped.
   # Accepted values: off | calibrated
   free_mode: off
+
+# Every capability ships whole and disarmed. Read one before arming it:
+# open-brain capabilities explain <name>
+# open-brain capabilities enable <name>
+capabilities:
+  hooks:
+    # Wire Open Brain into the events of your AI CLI. Reads the vault only, costs nothing.
+    enabled: false
+    # Host CLIs to wire: claude-code, codex
+    targets: []
+    # Per-hook time budget, in milliseconds. OPEN_BRAIN_HOOK_BUDGET_MS overrides this.
+    budget_ms: 2000
+  capture:
+    # Fill the staging area with candidates. Nothing reaches the kernel without your review.
+    enabled: false
+  transcripts:
+    # Read session transcripts, which normally live outside this vault.
+    enabled: false
+    # Directories you explicitly consent to. Empty means nothing is ever read.
+    roots: []
+    # Strip secrets and obvious identifiers before anything is written into the vault.
+    redact: true
+  classifier:
+    # Ask a model to classify staged candidates. The only capability that costs money.
+    enabled: false
+    # Accepted values: none | claude-code-subagent
+    provider: none
+    # Hard cap on model calls per day. A run stops when the budget is spent.
+    daily_call_budget: 25
+  learning:
+    # Decision journal and sensors. Purely observational, they conclude nothing.
+    enabled: false
+    # Evaluate beliefs and move their confidence. This one starts to change behavior.
+    evaluate: false
+    # The only subtractive operation: it deletes; `learn consolidate --restore` undoes it.
+    consolidate: false
+
+# The three sections below are tuning, not arm/disarm switches: they are
+# distinct from the capabilities above, and every value here is optional, with
+# a generic default applied when it is absent or malformed. capture and
+# learning below already take effect: their own readers parse this file
+# directly. staging.max_chars is not consumed yet; `staging list` and
+# `staging show` still default --max-chars to 4000 and 8000 respectively.
+
+# Not yet consumed: see the note above.
+staging:
+  max_chars: 4000
+
+# The capture pre-filter: deterministic and configurable, never a classifier.
+# See `open-brain capture markers` to inspect the filter actually in force.
+capture:
+  markers:
+    # Built-in phrase packs to load. Only "en" ships today.
+    packs: [en]
+    # Your own phrases, in your own language: [{id, explicit_request, correction,
+    # correction_lead, praise, praise_negations, praise_meta_words}, ...]
+    custom: []
+    limits:
+      max_correction_chars: 1200
+      negation_window_chars: 12
+      meta_window_chars: 24
+      max_markers_per_message: 8
+  limits:
+    max_messages_per_scan: 40
+    max_candidates_per_scan: 10
+    transcript_max_bytes: 512000
+    transcript_max_lines: 4000
+
+# Tuning for the learning layer, distinct from capabilities.learning above.
+learning:
+  # Belief history entries kept before the overflow folds into one summary.
+  history:
+    max_entries: 200
+  sensors:
+    circulation:
+      read_tools: [Read, NotebookRead]
+      write_tools: [Write, Edit, NotebookEdit]
+      max_partitions: 2
+      max_entries: 2000
+  evaluator:
+    correction_window_turns: 2
+    confirmation_window_turns: 3
+    dead_output_days: 7
+    rapid_followup_seconds: 120
+    session_closed_hours: 12
+  injection:
+    max_chars: 1500
+    max_law: 1
+    max_active: 1
+    statement_clip: 160
+    drift_alert_tokens: 350

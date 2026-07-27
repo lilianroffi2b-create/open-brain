@@ -1,7 +1,5 @@
-import { loadCatalog } from "./catalog.js";
 import { checkVaultHealth, type HealthOptions, type VaultHealthReport } from "./health.js";
-import { writeIndexArtifacts } from "./index-writer.js";
-import { scanVault } from "./scan.js";
+import { runVaultScan } from "./scan.js";
 import type { FreshnessEnvelope, VaultConfig } from "./types.js";
 
 export interface VaultStatusOptions extends HealthOptions {
@@ -35,9 +33,7 @@ export async function getVaultStatus(
   let rescanned = false;
 
   if (shouldRescan) {
-    const previousRecords = await loadCatalog(root, config);
-    const scan = await scanVault(root, config, { now, previousRecords });
-    const write = await writeIndexArtifacts(root, config, scan, { now });
+    const write = await runVaultScan(root, config, { now });
     freshness = write.freshness;
     rescanned = true;
     health = await checkVaultHealth(root, config, { ...options, now });
