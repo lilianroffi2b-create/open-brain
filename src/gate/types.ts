@@ -47,6 +47,27 @@ export const MEMORY_NAME_PATTERN = /^[a-z0-9]+(?:_[a-z0-9]+)*\.md$/u;
 /** The lifecycles a note may declare. Mirrors the vault lifecycle vocabulary. */
 export const MEMORY_LIFECYCLES: readonly string[] = ["working", "reference", "master"];
 
+/**
+ * Age past which a batch stops being presentable as it stands, in days.
+ *
+ * The gate cannot VERIFY freshness: whether an item is still true is a semantic
+ * question, and answering it is the model's job. What the gate can do is refuse
+ * to let staleness pass in silence, so a batch prepared last week never reaches
+ * a reviewer looking exactly like one prepared a minute ago.
+ */
+export const BATCH_STALE_DAYS = 2;
+
+/** How old a batch is, and whether that age has to be said out loud. */
+export interface BatchFreshness {
+  /** When the batch was built, or null on a batch written before the stamp. */
+  prepared_at: string | null;
+  /** Age in days, rounded to one decimal. Null when there is no stamp to age. */
+  age_days: number | null;
+  stale: boolean;
+  /** Present only when stale, and addressed to whoever presents the batch. */
+  stale_warning?: string;
+}
+
 /** Default character cap of a review presentation, per invariant I11. */
 export const DEFAULT_REVIEW_CHARS = 12_000;
 
@@ -114,7 +135,7 @@ export type DerivedBatchPhase =
   | "decision_needs_resume"
   | "complete_needs_compact";
 
-export interface ActiveBatchView {
+export interface ActiveBatchView extends BatchFreshness {
   batch_id: string;
   phase: DerivedBatchPhase;
   stored_phase: BatchPhase | null;
@@ -136,6 +157,8 @@ export interface PendingReport {
   active_batches: ActiveBatchView[];
   /** Batches that are applied and archived. Counted, never listed: I11. */
   completed_batches: number;
+  /** How many active batches are older than BATCH_STALE_DAYS, listed or not. */
+  stale_count: number;
   pending_candidates: number;
   staged_candidates: number;
   budget: ContextBudget;
@@ -178,7 +201,7 @@ export interface PrepareResult {
   next: string;
 }
 
-export interface ShowResult {
+export interface ShowResult extends BatchFreshness {
   schema_version: number;
   batch_id: string;
   phase: DerivedBatchPhase;

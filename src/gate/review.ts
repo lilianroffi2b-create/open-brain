@@ -12,6 +12,9 @@ import {
   parseClassificationDocument,
   type ClassificationItem,
 } from "../classifier/contract.js";
+// The one place that knows where the living state lives. The freshness warning
+// has to name that file, and naming it twice is how the two names drift apart.
+import { stateRelativePath } from "../hooks/vault.js";
 import { loadPreferenceLedger } from "../prefs/index.js";
 import type { Preference, PreferenceLedger } from "../prefs/types.js";
 import {
@@ -54,6 +57,7 @@ import {
 import { newConfirmationToken } from "./presence.js";
 import { renderReview, renderStagedSlice, unifiedDiff } from "./render.js";
 import {
+  BATCH_STALE_DAYS,
   DEFAULT_REVIEW_CHARS,
   DEFAULT_STAGED_CHARS,
   MEMORY_DIRECTORY,
@@ -68,6 +72,7 @@ import {
   SYNC_SCHEMA_VERSION,
   SyncGateError,
   type ActiveBatchView,
+  type BatchFreshness,
   type DerivedBatchPhase,
   type PendingReport,
   type PrepareResult,
@@ -92,6 +97,50 @@ const BATCH_FILE_PATTERN = /^batch-[0-9a-f]{24}\.json$/u;
 
 /** Active batches listed at once by `sync pending`, per invariant I11. */
 const MAX_PENDING_LISTED = 20;
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
+
+function staleWarning(ageDays: number | null, stateRelative: string): string {
+  const age = ageDays === null
+    ? "This batch carries no readable preparation date, so it is treated as out of date."
+    : `This batch was prepared ${String(ageDays)} day(s) ago, and the world may have moved since.`;
+  return `${age} Read ${stateRelative} in full first, then check every item against the real state before presenting it. An item that has become false is presented as false, never as one more neutral option.`;
+}
+
+/**
+ * How old a batch is, and whether that has to be said out loud.
+ *
+ * The gate measures the age and stops there. Whether an item is still true is
+ * semantic, so it is the model's job, not the gate's; what the gate refuses is
+ * to let a nine day old batch reach a reviewer looking exactly like a nine
+ * minute old one. A missing or unreadable stamp is treated as stale rather than
+ * as fresh: an unknown age is not a young one.
+ */
+export function batchFreshness(
+  batch: StagingBatch,
+  config: VaultConfig,
+  now: number = Date.now(),
+): BatchFreshness {
+  const stateRelative = stateRelativePath(config);
+  const prepared = batch.prepared_at === null ? Number.NaN : Date.parse(batch.prepared_at);
+  if (Number.isNaN(prepared)) {
+    return {
+      prepared_at: null,
+      age_days: null,
+      stale: true,
+      stale_warning: staleWarning(null, stateRelative),
+    };
+  }
+  const age = Math.max(0, (now - prepared) / MILLISECONDS_PER_DAY);
+  const ageDays = Math.round(age * 10) / 10;
+  const stale = age >= BATCH_STALE_DAYS;
+  return {
+    prepared_at: batch.prepared_at,
+    age_days: ageDays,
+    stale,
+    ...(stale ? { stale_warning: staleWarning(ageDays, stateRelative) } : {}),
+  };
+}
 
 export interface BatchPaths {
   directory: string;
@@ -407,6 +456,7 @@ export function parseBatch(value: unknown, origin: string): StagingBatch {
     items,
     batch_id: batchId,
     content_hash: contentHash,
+    prepared_at: typeof value.prepared_at === "string" ? value.prepared_at : null,
   };
 }
 
@@ -765,6 +815,7 @@ export async function syncPending(root: string, config: VaultConfig): Promise<Pe
     const undoable = (await readTextFile(paths.seal)) !== undefined && !undone;
 
     active.push({
+      ...batchFreshness(batch, config),
       batch_id: batchId,
       phase,
       stored_phase: state?.phase ?? null,
@@ -802,6 +853,9 @@ export async function syncPending(root: string, config: VaultConfig): Promise<Pe
     schema_version: SYNC_SCHEMA_VERSION,
     active_batches: shown,
     completed_batches: completed,
+    // Counted over every active batch, listed or not: a stale batch pushed past
+    // the listing cap is exactly the one nobody would notice otherwise.
+    stale_count: active.filter((view) => view.stale).length,
     pending_candidates: pending,
     staged_candidates: staged,
     budget: {
@@ -1256,6 +1310,9 @@ export async function buildBatch(
     items,
     batch_id: computeBatchId(contentHash),
     content_hash: contentHash,
+    // Stamped by prepareBatch, which is the step that knows whether this batch
+    // is being written for the first time or replayed onto one already on disk.
+    prepared_at: null,
   };
 }
 
@@ -1412,7 +1469,18 @@ export async function prepareBatch(
     }
 
     const paths = batchPaths(root, config, batch.batch_id);
-    const created = await writeImmutableJson(paths.batch, batch, "This batch");
+    // A replay has to land on the bytes already on disk, so the stamp of the
+    // first preparation is kept rather than refreshed: restamping it would make
+    // an immutable file differ from itself and turn a recoverable crash into a
+    // refusal.
+    const persisted = await readJsonFile(paths.batch, `${batch.batch_id}.json`);
+    const stamped: StagingBatch = {
+      ...batch,
+      prepared_at: isRecord(persisted) && typeof persisted.prepared_at === "string"
+        ? persisted.prepared_at
+        : nowTimestamp(),
+    };
+    const created = await writeImmutableJson(paths.batch, stamped, "This batch");
 
     const existingState = await loadBatchState(root, config, batch.batch_id);
     if (!existingState) {
@@ -1522,6 +1590,7 @@ export async function showBatch(
   const decide = `Decide with \`open-brain sync validate --batch ${batchId} --approve "<indices you approve, or an empty string to reject everything>" --confirm ${presented.token}\`. The token is printed here and nowhere else: retyping it is how the gate knows somebody read this batch.`;
 
   return {
+    ...batchFreshness(batch, config),
     schema_version: SYNC_SCHEMA_VERSION,
     batch_id: batchId,
     phase,

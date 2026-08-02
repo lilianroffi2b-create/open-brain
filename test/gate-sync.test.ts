@@ -13,6 +13,7 @@ import type { VaultConfig } from "../src/core/types.js";
 import { validateApply, resumeBatch, parseApprovedIndices } from "../src/gate/apply.js";
 import { renderReview } from "../src/gate/render.js";
 import {
+  batchFreshness,
   batchPaths,
   loadBatch,
   loadBatchState,
@@ -789,6 +790,77 @@ test("a slice that moved under the classifier is refused", async (t) => {
     }),
     (error: unknown) => error instanceof SyncGateError && /reclassify that slice/u.test(String(error)),
   );
+});
+
+test("a batch carries its age, and an old one says so before it is presented", async (t) => {
+  const root = await newVault("open-brain-gate-freshness-");
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const id = await stage(root);
+  const slice = await syncStaged(root, config);
+  const prepared = await prepareBatch(root, config, {
+    items: [preferenceItem(id, "short-answers")],
+    selectionId: slice.selection_id,
+  });
+
+  const fresh = await syncPending(root, config);
+  assert.equal(fresh.stale_count, 0);
+  const young = fresh.active_batches[0];
+  assert.equal(typeof young?.prepared_at, "string");
+  assert.equal(young?.age_days, 0);
+  assert.equal(young?.stale, false);
+  assert.equal(young?.stale_warning, undefined);
+
+  // Ageing the stamp on disk is enough, which is also the proof that it sits
+  // outside the signature: the batch still verifies after the edit.
+  const paths = batchPaths(root, config, prepared.batch_id);
+  const stored = JSON.parse(await readFile(paths.batch, "utf8")) as Record<string, unknown>;
+  const nineDaysAgo = new Date(Date.now() - 9 * 24 * 60 * 60 * 1_000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/u, "Z");
+  await writeFile(
+    paths.batch,
+    `${JSON.stringify({ ...stored, prepared_at: nineDaysAgo }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const loaded = await loadBatch(root, config, prepared.batch_id);
+  assert.equal(loaded.prepared_at, nineDaysAgo);
+
+  const aged = await syncPending(root, config);
+  assert.equal(aged.stale_count, 1);
+  const old = aged.active_batches[0];
+  assert.equal(old?.stale, true);
+  assert.equal(old?.age_days, 9);
+  assert.match(String(old?.stale_warning), /10_memory\/_state\.md/u);
+  assert.match(String(old?.stale_warning), /never as one more neutral option/u);
+
+  const shown = await showBatch(root, config, prepared.batch_id);
+  assert.equal(shown.stale, true);
+  assert.equal(shown.age_days, 9);
+  assert.equal(shown.prepared_at, nineDaysAgo);
+  assert.match(String(shown.stale_warning), /in full/u);
+
+  // A batch written before the stamp existed, and one carrying a stamp nobody
+  // can read, are both out of date rather than brand new: an unknown age is not
+  // a young one.
+  for (const stamp of [null, "last tuesday"]) {
+    const unknown = batchFreshness({ ...loaded, prepared_at: stamp }, config);
+    assert.equal(unknown.stale, true);
+    assert.equal(unknown.age_days, null);
+    assert.equal(unknown.prepared_at, null);
+    assert.match(String(unknown.stale_warning), /no readable preparation date/u);
+  }
+
+  // Two days is the line, and the age is reported to one decimal.
+  const almost = batchFreshness(
+    { ...loaded, prepared_at: nineDaysAgo },
+    config,
+    Date.parse(nineDaysAgo) + 1.95 * 24 * 60 * 60 * 1_000,
+  );
+  assert.equal(almost.stale, false);
+  assert.equal(almost.age_days, 2);
+  assert.equal(almost.stale_warning, undefined);
 });
 
 test("approved indices are parsed strictly and never default to everything", () => {

@@ -12,6 +12,7 @@ import {
   applyPreferenceOperation,
   createPreferenceLedger,
   loadPreferenceLedger,
+  MAX_OPERATION_HISTORY,
   PREFERENCE_CORE_RELATIVE_PATH,
   PREFERENCE_CREATION_SIGNAL,
   PREFERENCE_LEDGER_RELATIVE_PATH,
@@ -449,4 +450,90 @@ test("a ledger written before these fields existed loads, replays, and mutates w
     readPreferenceOperations(final).map((record) => record.operation_id),
     ["op-legacy", "op-new"],
   );
+});
+
+test("an operation identifier is never forgotten, whatever happened since", async (t) => {
+  const root = await seedVault([preference("answer-first", { weight: 5, status: "law" })]);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  // The gate applies one identified operation at weight 5.
+  const applied = await runPreferenceOperation(root, {
+    kind: "log",
+    id: "answer-first",
+    signal: "validated_sync",
+    weight: 5,
+    date: "2026-07-20",
+    operationId: "batch-one:apply:cand-1",
+  }, { command: "sync validate" });
+  assert.equal(applied.outcome.kind, "applied");
+
+  // A human then lowers it on purpose.
+  const lowered = await runPreferenceOperation(root, {
+    kind: "log",
+    id: "answer-first",
+    signal: "correction",
+    weight: 2,
+    date: "2026-07-21",
+  });
+  assert.equal(lowered.outcome.kind, "applied");
+  assert.equal((await loadPreferenceLedger(root)).preferences[0]?.weight, 2);
+
+  // Ordinary traffic pushes the first operation out of the readable window.
+  // Built in memory and saved once: two hundred round trips through the lock
+  // would test the lock, and this is about what the ledger remembers.
+  let crowding = await loadPreferenceLedger(root);
+  for (let index = 0; index < MAX_OPERATION_HISTORY; index += 1) {
+    const outcome = applyPreferenceOperation(crowding, {
+      kind: "log",
+      id: "answer-first",
+      signal: `routine-${String(index)}`,
+      weight: 2,
+      date: "2026-07-22",
+      operationId: `filler-${String(index)}`,
+    });
+    assert.equal(outcome.kind, "applied");
+    if (outcome.kind === "applied") {
+      crowding = outcome.ledger;
+    }
+  }
+  await savePreferenceLedger(root, crowding, { command: "test crowd" });
+
+  const crowded = await loadPreferenceLedger(root);
+  const records = readPreferenceOperations(crowded);
+  const oldest = records.find((record) => record.operation_id === "batch-one:apply:cand-1");
+  assert.ok(oldest, "the identifier is still there after being pushed out of the window");
+  assert.equal(oldest.compacted, true, "kept as a digest rather than in full");
+  assert.equal(oldest.request.text, undefined, "the bulk of the request is gone");
+  assert.equal(typeof oldest.request_sha256, "string");
+
+  // The same operation arrives a second time, long after its record was
+  // compacted. It must change nothing at all.
+  const before = await readFile(join(root, PREFERENCE_LEDGER_RELATIVE_PATH), "utf8");
+  const replay = await runPreferenceOperation(root, {
+    kind: "log",
+    id: "answer-first",
+    signal: "validated_sync",
+    weight: 5,
+    date: "2026-07-20",
+    operationId: "batch-one:apply:cand-1",
+  }, { command: "sync validate" });
+  assert.equal(replay.outcome.kind, "replayed");
+  assert.equal(await readFile(join(root, PREFERENCE_LEDGER_RELATIVE_PATH), "utf8"), before);
+  assert.equal(
+    (await loadPreferenceLedger(root)).preferences[0]?.weight,
+    2,
+    "the weight the human chose is still the weight",
+  );
+
+  // And a compacted record still tells a different payload from the same one.
+  const conflict = await runPreferenceOperation(root, {
+    kind: "log",
+    id: "answer-first",
+    signal: "validated_sync",
+    weight: 4,
+    date: "2026-07-20",
+    operationId: "batch-one:apply:cand-1",
+  });
+  assert.equal(conflict.outcome.kind, "conflict");
+  assert.equal(await readFile(join(root, PREFERENCE_LEDGER_RELATIVE_PATH), "utf8"), before);
 });

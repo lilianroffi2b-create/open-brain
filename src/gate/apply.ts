@@ -10,6 +10,7 @@ import { DEFAULT_LOADER_FILENAMES } from "../loaders/markers.js";
 import {
   isPreferenceWeight,
   loadPreferenceLedger,
+  PreferenceLedgerMissingError,
   PREFERENCE_CORE_RELATIVE_PATH,
   PREFERENCE_LEDGER_RELATIVE_PATH,
   readPreferenceOperations,
@@ -116,6 +117,54 @@ function refFor(item: BatchItem): string {
       return item.write.target;
     case "reject_only":
       return "none";
+  }
+}
+
+/**
+ * The destination an item writes to, named the way a human would name it. Null
+ * for a recorded rejection, which has no destination at all.
+ */
+function destinationOf(item: BatchItem): string | null {
+  switch (item.write.kind) {
+    case "preference":
+    case "weight":
+      return `preference ${item.write.args.id}`;
+    case "memory":
+      return `note ${item.write.target}`;
+    case "reject_only":
+      return null;
+  }
+}
+
+/**
+ * Refuses an approval that names the same destination twice.
+ *
+ * Every approved item is preflighted against the vault as it stands before the
+ * first write, so two items pointing at one file are both told the coast is
+ * clear, and then the second one arrives at a destination the first has already
+ * changed. On the kernel that ends the run halfway through, with the batch stuck
+ * in apply_failed and nothing left that a resume can repair; on a note it is
+ * worse, because both items report success and only the last body survives, so
+ * the human is told two contradictory things were both written.
+ *
+ * This runs before the decision is frozen, which is the last moment a refusal
+ * costs nothing: not one byte has been written and the batch stays exactly where
+ * it was, waiting for a decision that names at most one item per destination.
+ */
+function assertDistinctDestinations(items: readonly BatchItem[]): void {
+  const seen = new Map<string, number>();
+  for (const item of items) {
+    const destination = destinationOf(item);
+    if (destination === null) {
+      continue;
+    }
+    const first = seen.get(destination);
+    if (first !== undefined) {
+      throw new SyncGateError(
+        `Item ${String(first)} and item ${String(item.index)} both write to ${destination}, and a batch applies its items one after the other, so approving both would leave whatever the second one says and hide the first. Nothing was applied and no decision was recorded. Approve at most one of them, then run the review again for what is left.`,
+      );
+    }
+    seen.set(destination, item.index);
   }
 }
 
@@ -486,12 +535,39 @@ async function applyWeight(
   }
 }
 
+/**
+ * Writes one note, after checking the precondition against the disk as it is
+ * now rather than as it was during the preflight pass.
+ *
+ * The preflight reads every destination before the first write, so its answer
+ * about this note is already old by the time this runs: another item of the same
+ * batch, another process, or a person with an editor may have reached the file
+ * in between. Overwriting on the strength of a stale check is how two approved
+ * bodies both get reported as written while only one of them exists.
+ */
 async function applyMemory(
   root: string,
   config: VaultConfig,
   write: MemoryWritePayload,
 ): Promise<void> {
   const resolved = await resolveMemoryTarget(root, config, write.target);
+  const existing = await readTextFile(resolved.absolutePath);
+  const actual = existing === undefined ? undefined : sha256(existing);
+  if (actual === write.content_sha256) {
+    // Already exactly the approved bytes: a replay, not a second write.
+    return;
+  }
+  if (write.precondition.expected_sha256 === "absent") {
+    if (existing !== undefined) {
+      throw new SyncGateError(
+        `${write.target} was to be created by this item, and it exists now with other content. It was not overwritten and nothing else was applied.`,
+      );
+    }
+  } else if (actual !== write.precondition.expected_sha256) {
+    throw new SyncGateError(
+      `${write.target} no longer hashes to ${write.precondition.expected_sha256.slice(0, 12)}, the state this item was approved against; it hashes to ${actual === undefined ? "nothing, the file is gone" : actual.slice(0, 12)}. It was not overwritten and nothing else was applied.`,
+    );
+  }
   await atomicWriteText(resolved.absolutePath, write.content);
   const written = await readFile(resolved.absolutePath, "utf8");
   if (sha256(written) !== write.content_sha256) {
@@ -523,11 +599,22 @@ async function applyDestination(
   }
 }
 
+/**
+ * Reads the ledger, if this vault has one at all.
+ *
+ * Only absence is answered with undefined. A ledger that exists and cannot be
+ * read is a different fact, and swallowing it here is how the gate ends up
+ * telling somebody there is no ledger in a vault whose ledger is right there,
+ * unreadable, with `init` refusing to overwrite it.
+ */
 async function loadLedgerIfAny(root: string): Promise<PreferenceLedger | undefined> {
   try {
     return await loadPreferenceLedger(root);
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (error instanceof PreferenceLedgerMissingError) {
+      return undefined;
+    }
+    throw error;
   }
 }
 
@@ -602,6 +689,18 @@ export async function validateApply(
     // 1. Load and verify the batch and the state.
     const batch = await loadBatch(root, config, input.batchId);
     const paths = batchPaths(root, config, batch.batch_id);
+
+    // 1b. A batch that was applied and then reversed is finished in both
+    // directions. Replaying it would write back exactly what the reversal was
+    // asked to take out, and this refusal comes before the first state write so
+    // a resume run by habit leaves a settled batch exactly as it is.
+    const undoneMarker = await readTextFile(paths.undone);
+    if (undoneMarker !== undefined) {
+      throw new SyncGateError(
+        `Batch ${batch.batch_id} was applied and then reversed with \`open-brain sync undo\`. Replaying it now would write back what that reversal deliberately removed, so it is refused and nothing was changed. Prepare a new batch if those changes should exist again.`,
+      );
+    }
+
     let state = await loadBatchState(root, config, batch.batch_id)
       ?? await saveBatchState(root, config, initialBatchState(batch));
 
@@ -647,6 +746,10 @@ export async function validateApply(
     const approvedItems = approved
       .map((index) => batch.items[index - 1])
       .filter((item): item is BatchItem => item !== undefined);
+
+    // 4c. One destination, one approved item. Two of them would preflight
+    // against the same pre-write vault and then collide inside step 12.
+    assertDistinctDestinations(approvedItems);
 
     // 5. Preflight every approved item. No mutation happens in this pass.
     const ledger = await loadLedgerIfAny(root);
@@ -696,8 +799,10 @@ export async function validateApply(
       }
     }
 
-    // 11. Enter the applying phase.
-    if (state.phase !== "applying") {
+    // 11. Enter the applying phase. A batch that already reached complete is
+    // never walked backwards into it: a phase that says less than the batch has
+    // already achieved sends the next resume down the wrong path.
+    if (state.phase !== "applying" && state.phase !== "complete") {
       state = await saveBatchState(root, config, { ...state, phase: "applying" });
     }
 

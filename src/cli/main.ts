@@ -308,6 +308,14 @@ const doctorCommand = defineCommand({
       );
       process.exitCode = 2;
     }
+    if (result.redline.unverified) {
+      // Not a failure, and not a clean line either: this says the report cannot
+      // vouch for a file that is there, which is a different thing from saying
+      // it checked it and found it whole.
+      printNotice(
+        "Part of the preference kernel is not covered by any recorded write, so `redline` in this report cannot say whether it was reviewed. It is not evidence of tampering, and it is not a clean bill of health either.",
+      );
+    }
     for (const issue of result.capabilityIssues) {
       printNotice(issue);
       process.exitCode = 2;

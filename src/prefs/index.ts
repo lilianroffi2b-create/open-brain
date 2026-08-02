@@ -43,6 +43,7 @@ export {
   type PreferenceOperationOutcome,
   type PreferenceOperationRecord,
   type PreferenceOperationRequest,
+  type StoredOperationRequest,
 } from "./ledger.js";
 
 export { renderPreferenceCore, renderPreferenceMirror } from "./render.js";
@@ -52,6 +53,8 @@ export {
   PREFERENCE_LEDGER_RELATIVE_PATH,
   PREFERENCE_LOCK_NAME,
   loadPreferenceLedger,
+  PreferenceLedgerMissingError,
+  PreferenceLedgerUnreadableError,
   regeneratePreferenceOutputs,
   runPreferenceOperation,
   savePreferenceLedger,
@@ -69,6 +72,7 @@ export {
   REDLINE_JOURNAL_RELATIVE_PATH,
   REDLINE_SCHEMA_VERSION,
   REDLINE_STATE_RELATIVE_PATH,
+  REDLINE_TARGET_PATHS,
   REDLINE_TARGETS,
   verifyRedline,
   writeThroughRedline,
@@ -77,7 +81,9 @@ export {
   type RedlineJournal,
   type RedlineJournalOptions,
   type RedlineProvenance,
+  type RedlineRecordStatus,
   type RedlineReport,
+  type RedlineSource,
   type RedlineState,
   type RedlineTarget,
   type RedlineVerdict,

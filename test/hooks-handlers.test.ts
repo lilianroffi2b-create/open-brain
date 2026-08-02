@@ -22,9 +22,13 @@ import {
 } from "../src/hooks/pre-compact.js";
 import { blockFormFor, type HookContext } from "../src/hooks/runtime.js";
 import {
+  DEFAULT_LINE_BUDGETS,
+  declaredLineBudgets,
   declaredMaxLoad,
+  lineBudgetMessage,
   planConsolidation,
   splitStateChunks,
+  stateLineViolations,
 } from "../src/hooks/stop.js";
 import {
   buildSessionContext,
@@ -295,6 +299,52 @@ test("invariant I11: no state section can be starved by a long one", () => {
   assert.match(block.text, /THE-LAST-SECTION-SURVIVES/u);
 });
 
+test("a single overlong line is cut, never allowed to starve its whole section", () => {
+  const state = [
+    "## Current work",
+    `2026-08-02 (Sunday) ${"L".repeat(5_000)}`,
+    "## Active workstreams",
+    "THE-OTHER-SECTION-SURVIVES",
+  ].join("\n");
+  const block = buildSessionContext(
+    "[open-brain] Test: 0 document(s) indexed, fresh (last scan now).",
+    state,
+    "10_memory/_state.md",
+    MAX_SESSION_CONTEXT_CHARS,
+  );
+
+  assert.ok(block.text.length <= MAX_SESSION_CONTEXT_CHARS);
+  // The head of the line is injected rather than the section going empty.
+  assert.match(block.text, /2026-08-02 \(Sunday\) LLL/u);
+  assert.equal(block.text.includes("L".repeat(5_000)), false, "the whole line was injected");
+  assert.match(block.text, /\[open-brain\] CUT: /u);
+  assert.match(block.text, /section Current work is cut mid-sentence/u);
+  assert.match(block.text, /Open 10_memory\/_state\.md to read it in full/u);
+  assert.match(block.text, /THE-OTHER-SECTION-SURVIVES/u);
+});
+
+test("a head too short to teach anything is dropped instead of cut", () => {
+  const state = [
+    "## Current work",
+    "2026-08-02 (Sunday) " + "L".repeat(5_000),
+    "## Active workstreams",
+    "THE-OTHER-SECTION-SURVIVES",
+  ].join("\n");
+  // Two sections in 900 characters leave under MIN_CUT_CHARS of room once the
+  // heading and the truncation notice are paid for, so no head is injected.
+  const block = buildSessionContext(
+    "[open-brain] Test: 0 document(s) indexed, fresh (last scan now).",
+    state,
+    "10_memory/_state.md",
+    900,
+  );
+
+  assert.ok(block.text.length <= 900);
+  assert.equal(block.text.includes("CUT:"), false, "a useless head was injected anyway");
+  assert.match(block.text, /TRUNCATED/u);
+  assert.match(block.text, /Current work/u);
+});
+
 test("the session block is just the status line when there is no state file", () => {
   const block = buildSessionContext(
     "[open-brain] Test: no index yet.",
@@ -490,6 +540,141 @@ test("consolidation declines rather than empty a file it cannot split", () => {
     undefined,
     "no declared cap means no consolidation",
   );
+});
+
+const LINE_BUDGET_FRONTMATTER = [
+  "---",
+  "lifecycle: master",
+  "line_budget_day: 1200",
+  "line_budget_d1_d3: 700",
+  "line_budget_d4_d7: 250",
+  "line_budget_project: 450",
+  "line_budget_closed: 150",
+  "---",
+  "# Living state",
+  "",
+].join("\n");
+
+/** A date this many days before the given day, in the local calendar. */
+function daysAgo(days: number, now: Date): string {
+  const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - days, 12);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${String(date.getFullYear())}-${month}-${day}`;
+}
+
+test("the per-line budgets are the defaults until the document says otherwise", () => {
+  assert.deepEqual(declaredLineBudgets(""), DEFAULT_LINE_BUDGETS);
+  assert.deepEqual(declaredLineBudgets("---\nlifecycle: master\n---\n"), DEFAULT_LINE_BUDGETS);
+  assert.deepEqual(
+    declaredLineBudgets("---\nline_budget_day: 300\nline_budget_closed: 0\n---\n"),
+    { ...DEFAULT_LINE_BUDGETS, day: 300 },
+    "a nonsense value falls back rather than disarming the budget",
+  );
+  // Declared too far down the file to be a cheap read is declared nowhere.
+  assert.deepEqual(
+    declaredLineBudgets("x".repeat(5_000) + "\nline_budget_day: 10\n"),
+    DEFAULT_LINE_BUDGETS,
+  );
+});
+
+test("a living state inside its per-line budgets says nothing at all", () => {
+  const now = new Date();
+  const state = LINE_BUDGET_FRONTMATTER + [
+    "## Current work",
+    `${daysAgo(0, now)} (today) Short and to the point. Detail in 20_contexts/port.md.`,
+    `${daysAgo(2, now)} (two days ago) Shorter still.`,
+    "",
+    "## Active workstreams",
+    "- [parity port] waiting on review -> 20_contexts/port.md",
+    "",
+    "## Closed workstreams",
+    "- [old thing] done -> 90_archive/old.md",
+    "",
+  ].join("\n");
+  assert.deepEqual(stateLineViolations(state, now), []);
+});
+
+test("the budget of a dated line tightens as the day ages", () => {
+  const now = new Date();
+  const body = (day: number): string => LINE_BUDGET_FRONTMATTER + [
+    "## Current work",
+    `${daysAgo(day, now)} (a day) ${"x".repeat(900)}`,
+    "",
+  ].join("\n");
+
+  assert.deepEqual(stateLineViolations(body(0), now), [], "900 characters fit the day of");
+  const yesterday = stateLineViolations(body(2), now);
+  assert.equal(yesterday.length, 1);
+  assert.match(String(yesterday[0]), /Current work, day \d{4}-\d{2}-\d{2} \(D-2\)/u);
+  assert.match(String(yesterday[0]), /budget of 700/u);
+  assert.match(String(yesterday[0]), /drop anything already written in a file this line cites/u);
+
+  const lastWeek = stateLineViolations(body(5), now);
+  assert.equal(lastWeek.length, 1);
+  assert.match(String(lastWeek[0]), /\(D-5\)/u);
+  assert.match(String(lastWeek[0]), /budget of 250/u);
+});
+
+test("workstream lines carry their own budgets, open and closed", () => {
+  const now = new Date();
+  const state = LINE_BUDGET_FRONTMATTER + [
+    "## Active workstreams",
+    `- [the parity port] ${"x".repeat(600)}`,
+    "## Closed workstreams",
+    `- [the old thing] ${"x".repeat(300)}`,
+    "",
+  ].join("\n");
+  const violations = stateLineViolations(state, now);
+  assert.equal(violations.length, 2);
+  assert.match(String(violations[0]), /Active workstreams, "\[the parity port\]/u);
+  assert.match(String(violations[0]), /budget of 450/u);
+  assert.match(String(violations[1]), /budget of 150/u);
+  assert.match(String(violations[1]), /detail belongs in the vault file this line points to/u);
+});
+
+test("generated blocks and unbudgeted sections are not judged", () => {
+  const now = new Date();
+  const state = LINE_BUDGET_FRONTMATTER + [
+    "## Current work",
+    `${daysAgo(0, now)} (today) Short.`,
+    "",
+    `> [open-brain] 4000 character(s) moved to 90_archive/state/_state-x.md. ${"x".repeat(900)}`,
+    "<!-- openbrain:begin -->",
+    `- ${"x".repeat(900)}`,
+    "<!-- openbrain:end -->",
+    "",
+    "## Handoff",
+    `- ${"x".repeat(900)}`,
+    "",
+  ].join("\n");
+  assert.deepEqual(stateLineViolations(state, now), []);
+});
+
+test("the front matter of the document wins over the default budget", () => {
+  const now = new Date();
+  const state = [
+    "---",
+    "lifecycle: master",
+    "line_budget_day: 40",
+    "---",
+    "## Current work",
+    `${daysAgo(0, now)} (today) This line is well under twelve hundred characters.`,
+    "",
+  ].join("\n");
+  const violations = stateLineViolations(state, now);
+  assert.equal(violations.length, 1);
+  assert.match(String(violations[0]), /budget of 40/u);
+});
+
+test("the block message names every offending line and caps how many it lists", () => {
+  const many = Array.from({ length: 14 }, (_, index) => `  line ${String(index)}`);
+  const message = lineBudgetMessage("10_memory/_state.md", many);
+  assert.match(message, /^\[open-brain load\] 10_memory\/_state\.md is over the per-line budgets/u);
+  assert.match(message, /A writing rule that lives only in a header does not hold/u);
+  assert.match(message, /4 more line\(s\) are over budget/u);
+  assert.equal(message.includes("line 9"), true);
+  assert.equal(message.includes("line 10"), false);
 });
 
 test("pre-compact dispatches to a registered extractor and swallows its failures", async (t) => {

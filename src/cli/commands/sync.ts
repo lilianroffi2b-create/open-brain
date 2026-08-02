@@ -47,6 +47,10 @@ import { resolveVaultRoot } from "../vault.js";
  * between a human decision and a claimed one. `--unattended` waives the first
  * for people who drive their vault from an agent, says what it costs, and warns
  * on stderr every time it is used.
+ *
+ * `undo` writes to the same kernel, so it asks for the same two things on top of
+ * its own `--yes`. A door that reverses a human decision without proving a human
+ * asked for it is the same door, walked backwards.
  */
 
 function maxCharsArgument(args: unknown, name = "max-chars"): number | undefined {
@@ -296,13 +300,33 @@ const undoCommand = defineCommand({
       description: "Confirm the reversal. Without it nothing is written.",
       default: false,
     },
+    confirm: {
+      type: "string",
+      description:
+        "The short token `sync show` printed for this batch. Retyping it is what proves the batch was read.",
+      required: false,
+    },
+    unattended: {
+      type: "boolean",
+      description: UNATTENDED_DESCRIPTION,
+      default: false,
+    },
   },
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const config = await loadConfigForCli(root);
+    const unattended = booleanArgument(args, UNATTENDED_FLAG);
     printJson(await undoBatch(root, config, requiredString(args, "batch"), {
       yes: booleanArgument(args, "yes"),
+      proof: {
+        kind: "human",
+        confirm: optionalString(args, "confirm") ?? "",
+        presence: humanPresenceFromStdin(unattended),
+      },
     }));
+    if (unattended) {
+      process.stderr.write(`${UNATTENDED_WARNING}\n`);
+    }
   },
 });
 

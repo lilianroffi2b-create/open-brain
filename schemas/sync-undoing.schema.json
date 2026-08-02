@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/sync-undoing.schema.json",
+  "title": "OpenBrain Sync Undoing",
+  "description": "Written as <batch_id>.undoing.json under 10_memory/staging/batches/ before `open-brain sync undo` puts back its first file, and replaced by <batch_id>.undone.json once the last one is back. It names what is already restored, so a reversal interrupted halfway is resumed instead of refused for a drift it caused itself. Mutable and short lived, unlike every other document the gate writes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "batch_id", "started_at", "restored", "removed"],
+  "properties": {
+    "schema": { "const": "open-brain/sync-undoing/v1" },
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "batch_id": { "type": "string", "pattern": "^batch-[0-9a-f]{24}$" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "restored": {
+      "type": "array",
+      "description": "Vault-relative paths already written back to their pre-batch bytes.",
+      "items": { "type": "string" }
+    },
+    "removed": {
+      "type": "array",
+      "description": "Vault-relative paths the batch had created and that are already deleted.",
+      "items": { "type": "string" }
+    }
+  }
+}

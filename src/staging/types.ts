@@ -359,6 +359,12 @@ export interface StagingBatch {
   items: BatchItem[];
   batch_id: string;
   content_hash: string;
+  /**
+   * When the batch was built. Outside the content signature, so it changes
+   * nothing about the identity of the batch, and null on a batch written before
+   * the stamp existed rather than guessed after the fact.
+   */
+  prepared_at: string | null;
 }
 
 export type BatchPhase =

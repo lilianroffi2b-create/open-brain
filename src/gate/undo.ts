@@ -5,12 +5,18 @@ import { emptyBudget } from "../core/budget.js";
 import { atomicWriteText } from "../core/fs-atomic.js";
 import { sha256 } from "../core/text.js";
 import type { VaultConfig } from "../core/types.js";
-import { withPreferenceLock, writeThroughRedline } from "../prefs/index.js";
+import {
+  assertValidPreferenceLedger,
+  withPreferenceLock,
+  writeThroughRedline,
+} from "../prefs/index.js";
 import { isRecord, nowTimestamp } from "../staging/candidate.js";
+import { assertHumanPresence, type HumanPresence } from "./presence.js";
 import {
   batchPaths,
   loadBatch,
   loadBatchState,
+  loadPresentation,
   readTextFile,
   withSyncLock,
   writeImmutableJson,
@@ -48,6 +54,16 @@ import {
  * What undo does NOT do is rewrite history. The batch stays recorded as
  * applied, and its candidates stay archived with the decision that was made.
  * The files go back; the fact that you once said yes does not.
+ *
+ * Undo writes to the preference kernel, so it is a door into it, and a door is
+ * defined by its weakest lock. It therefore asks for exactly what `sync
+ * validate` asks for, a terminal on standard input and the token `sync show`
+ * printed for this batch, and it trusts its own record no further than it can
+ * check it: every snapshot carries a hash, the hash is verified before a single
+ * byte is written back, and restored ledger content goes through the same
+ * validator as a ledger written by hand. A record whose hash is missing is
+ * refused rather than restored, because a snapshot nothing can check is a
+ * snapshot anybody can write.
  */
 
 function parseSnapshot(value: unknown, origin: string): UndoTargetSnapshot {
@@ -68,12 +84,41 @@ function parseSnapshot(value: unknown, origin: string): UndoTargetSnapshot {
   }
   const existed = value.existed === true;
   const content = typeof value.content === "string" ? value.content : null;
-  if (existed && content === null) {
+  const recorded = typeof value.sha256 === "string" ? value.sha256 : null;
+
+  // A snapshot of a file that did not exist restores nothing, it deletes. So it
+  // must carry nothing to restore: content or a hash next to existed:false is a
+  // record somebody built by hand, not one the gate wrote.
+  if (!existed) {
+    if (content !== null || recorded !== null) {
+      throw new SyncGateError(
+        `${origin} says the file did not exist before the batch, yet carries content or a hash. The undo record was modified and is refused.`,
+      );
+    }
+    return {
+      kind: kind as UndoTargetKind,
+      path: value.path,
+      existed: false,
+      sha256: null,
+      bytes: null,
+      content: null,
+    };
+  }
+
+  if (content === null) {
     throw new SyncGateError(
       `${origin} says the file existed but carries no content, so it cannot be restored.`,
     );
   }
-  if (existed && typeof value.sha256 === "string" && sha256(content ?? "") !== value.sha256) {
+  // Unconditional, and fail closed on an absent hash. Verifying only when a hash
+  // happens to be there means deleting one key turns the check off, which makes
+  // the check a formality and the whole record forgeable.
+  if (recorded === null) {
+    throw new SyncGateError(
+      `${origin} carries content to restore but no hash of it. A snapshot nothing can check is a snapshot anybody can write, so it is refused. Nothing was changed.`,
+    );
+  }
+  if (sha256(content) !== recorded) {
     throw new SyncGateError(
       `${origin} does not match its own recorded hash. The undo record was modified and is refused.`,
     );
@@ -82,7 +127,7 @@ function parseSnapshot(value: unknown, origin: string): UndoTargetSnapshot {
     kind: kind as UndoTargetKind,
     path: value.path,
     existed,
-    sha256: typeof value.sha256 === "string" ? value.sha256 : null,
+    sha256: recorded,
     bytes: typeof value.bytes === "number" ? value.bytes : null,
     content,
   };
@@ -149,6 +194,56 @@ export function parseUndoSeal(value: unknown, origin: string): UndoSeal {
   };
 }
 
+/**
+ * The trace of a reversal that started and has not finished.
+ *
+ * Undo puts files back one at a time, so between the first one and the last one
+ * the vault matches neither the state the batch left nor the state before it. A
+ * reversal interrupted in there used to be unresumable: the drift check compared
+ * the disk with the seal, the files already put back no longer matched it, and
+ * every retry was refused for a drift the reversal itself had caused. This
+ * record is what makes the second run a continuation rather than a stranger: it
+ * names what is already back, so those files are checked against the state they
+ * were restored to and the rest against the seal, exactly as they should be.
+ *
+ * It is mutable and short lived, unlike everything else the gate writes. It
+ * exists only between the first restore and the undone marker, and the marker is
+ * what replaces it.
+ */
+export const SYNC_UNDOING_SCHEMA = "open-brain/sync-undoing/v1";
+
+export interface UndoProgress {
+  schema: typeof SYNC_UNDOING_SCHEMA;
+  schema_version: number;
+  batch_id: string;
+  started_at: string;
+  restored: string[];
+  removed: string[];
+}
+
+export function parseUndoProgress(value: unknown, origin: string): UndoProgress {
+  if (!isRecord(value) || value.schema !== SYNC_UNDOING_SCHEMA) {
+    throw new SyncGateError(`${origin} is not a ${SYNC_UNDOING_SCHEMA} document.`);
+  }
+  const paths = (field: string): string[] => {
+    const list = value[field];
+    if (!Array.isArray(list) || list.some((item) => typeof item !== "string")) {
+      throw new SyncGateError(`${origin}.${field} must be an array of paths.`);
+    }
+    return list.filter((item): item is string => typeof item === "string");
+  };
+  return {
+    schema: SYNC_UNDOING_SCHEMA,
+    schema_version: typeof value.schema_version === "number"
+      ? value.schema_version
+      : SYNC_SCHEMA_VERSION,
+    batch_id: typeof value.batch_id === "string" ? value.batch_id : "",
+    started_at: typeof value.started_at === "string" ? value.started_at : "",
+    restored: paths("restored"),
+    removed: paths("removed"),
+  };
+}
+
 async function readJson(path: string, origin: string): Promise<unknown> {
   const text = await readTextFile(path);
   if (text === undefined) {
@@ -169,6 +264,69 @@ async function removeFile(path: string): Promise<void> {
       return;
     }
     throw error;
+  }
+}
+
+/**
+ * Reads a ledger the record wants to put back, and refuses anything the ledger
+ * validator would refuse from any other writer.
+ *
+ * The hash of the snapshot proves the bytes are the ones that were recorded. It
+ * says nothing about what those bytes are, and the redline records whatever
+ * reaches it, so a ledger restored without this check would be published as a
+ * legitimate write and then verify clean forever after.
+ */
+function assertRestorableLedger(content: string, path: string): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch {
+    throw new SyncGateError(
+      `The undo record restores ${path}, but its content is not valid JSON, so it is not a ledger. Nothing was changed.`,
+    );
+  }
+  try {
+    assertValidPreferenceLedger(parsed);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new SyncGateError(
+      `The undo record restores ${path}, but its content is not a valid preference ledger: ${detail} Nothing was changed.`,
+    );
+  }
+}
+
+async function writeUndoProgress(path: string, progress: UndoProgress): Promise<void> {
+  await atomicWriteText(path, `${JSON.stringify(progress, null, 2)}\n`);
+}
+
+/**
+ * Turns whatever the filesystem raised into the one error type the CLI knows how
+ * to print, and says the two things the person in front of it needs: how far the
+ * reversal got, and that running it again continues from there. A stack trace
+ * would have told them neither.
+ */
+function reversalFailed(
+  batchId: string,
+  target: UndoTargetSnapshot,
+  error: unknown,
+  alreadyDone: number,
+): SyncGateError {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new SyncGateError(
+    `Batch ${batchId} could not be reversed: ${target.path} could not be put back (${detail}). ${String(alreadyDone)} file(s) were already restored or deleted, and that is recorded in ${batchId}.undoing.json, so running the same command again resumes from there instead of starting over. Fix what blocked this file first: nothing else was changed.`,
+  );
+}
+
+/**
+ * Runs the content checks that must happen before the first byte moves. A
+ * reversal that refuses halfway through has already written half of what it was
+ * refusing, so everything a record can be refused for is decided here.
+ */
+function assertRestorableRecord(record: UndoRecord): void {
+  for (const target of record.targets) {
+    if (target.kind === "preference_ledger" && target.existed) {
+      assertRestorableLedger(target.content ?? "", target.path);
+    }
   }
 }
 
@@ -211,9 +369,73 @@ async function restoreTarget(
   restored.push(snapshot.path);
 }
 
+/**
+ * What a caller offers as proof that this reversal is a human decision.
+ *
+ * The shape mirrors gate/types.ts DecisionProof on purpose: the two doors into
+ * the kernel answer to one contract, and a proof that is easier to produce on
+ * one of them is the one an agent will use. A replay carries nothing, and it is
+ * only ever accepted for an undo that is already recorded as under way, where
+ * the human said yes before the first byte moved.
+ */
+export type UndoProof =
+  | { kind: "human"; confirm: string; presence: HumanPresence }
+  | { kind: "replay" };
+
 export interface UndoOptions {
   /** Destructive by nature, so the caller has to say yes on purpose. */
   yes?: boolean;
+  /** What proves this reversal is a human decision. See gate/presence.ts. */
+  proof: UndoProof;
+}
+
+/**
+ * Refuses a reversal that nothing ties to a human.
+ *
+ * Two independent facts, the same two `sync validate` demands. A terminal on
+ * standard input answers "is anybody there", which no composed command line can
+ * fabricate about itself. The token `sync show` printed for this batch answers
+ * "does the caller know which batch this is", which a batch identifier does not:
+ * the identifier is written in every listing, the token is printed in one place.
+ * The escape hatch removes the first and leaves the second, exactly as it does
+ * on the other door.
+ */
+async function assertUndoProof(
+  root: string,
+  config: VaultConfig,
+  batchId: string,
+  // Typed as optional for callers that are not compiled against this signature.
+  // A missing proof is not a missing argument, it is a missing human.
+  proof: UndoProof | undefined,
+): Promise<void> {
+  if (proof === undefined) {
+    throw new SyncGateError(
+      `Reversing batch ${batchId} writes to the preference kernel and this call carries no proof that a human asked for it. Run \`open-brain sync undo ${batchId} --yes --confirm <the token sync show prints>\` from a terminal.`,
+    );
+  }
+  if (proof.kind === "replay") {
+    throw new SyncGateError(
+      `No reversal of batch ${batchId} is under way, so there is nothing to replay. Reverse it with \`open-brain sync undo ${batchId} --yes --confirm <the token sync show prints>\`.`,
+    );
+  }
+  assertHumanPresence(proof.presence, "`open-brain sync undo`");
+
+  const presented = await loadPresentation(root, config, batchId);
+  if (!presented) {
+    throw new SyncGateError(
+      `Batch ${batchId} was never presented, so there is no token to prove this reversal was asked for by somebody who read it. Run \`open-brain sync show --batch ${batchId}\` first: it prints a short confirmation token to pass back with --confirm.`,
+    );
+  }
+  if (proof.confirm.trim().length === 0) {
+    throw new SyncGateError(
+      `This command needs --confirm <token>. \`open-brain sync show --batch ${batchId}\` prints the token, and retyping it is what proves this batch was read rather than named. It has no default, on purpose: undo writes to the preference kernel.`,
+    );
+  }
+  if (proof.confirm.trim().toLowerCase() !== presented.token) {
+    throw new SyncGateError(
+      `The confirmation token does not match the one \`open-brain sync show --batch ${batchId}\` printed. Nothing was changed. Present the batch again and retype the token it gives you.`,
+    );
+  }
 }
 
 /**
@@ -223,14 +445,18 @@ export async function undoBatch(
   root: string,
   config: VaultConfig,
   batchId: string,
-  options: UndoOptions = {},
+  options: UndoOptions,
 ): Promise<UndoResult> {
   return withSyncLock(root, async () => {
     const batch = await loadBatch(root, config, batchId);
     const paths = batchPaths(root, config, batch.batch_id);
+    const progressPath = join(paths.directory, `${batch.batch_id}.undoing.json`);
 
     const undoneValue = await readJson(paths.undone, `${batchId}.undone.json`);
     if (undoneValue !== undefined) {
+      // The marker replaces the progress record, including after a crash that
+      // landed between the two writes.
+      await removeFile(progressPath);
       const undoneAt = isRecord(undoneValue) && typeof undoneValue.undone_at === "string"
         ? undoneValue.undone_at
         : "an earlier run";
@@ -252,6 +478,12 @@ export async function undoBatch(
       );
     }
     const record = parseUndoRecord(recordValue, `${batchId}.undo.json`);
+    assertRestorableRecord(record);
+
+    const progressValue = await readJson(progressPath, `${batchId}.undoing.json`);
+    const progress = progressValue === undefined
+      ? undefined
+      : parseUndoProgress(progressValue, `${batchId}.undoing.json`);
 
     const sealValue = await readJson(paths.seal, `${batchId}.undo-seal.json`);
     if (sealValue === undefined) {
@@ -268,12 +500,36 @@ export async function undoBatch(
       );
     }
 
+    // What an interrupted reversal claims to have put back, kept to the targets
+    // this batch actually has: a path the record does not know is a path nothing
+    // below verifies, and an unverified claim must never count as progress.
+    const snapshots = new Map(record.targets.map((target) => [target.path, target]));
+    const known = new Set(
+      seal.targets.map((target) => target.path).filter((path) => snapshots.has(path)),
+    );
+    const restored: string[] = (progress?.restored ?? []).filter((path) => known.has(path));
+    const removed: string[] = (progress?.removed ?? []).filter((path) => known.has(path));
+    const done = new Set([...restored, ...removed]);
+
     // The single condition of the whole module: the disk still holds exactly
-    // what the batch left behind.
+    // what the batch left behind. What an interrupted reversal already put back
+    // is held to the other end of the same record instead, since that is the
+    // state this very command wrote there.
     const drifted: string[] = [];
     for (const target of seal.targets) {
       const current = await readTextFile(join(root, target.path));
       const actual = current === undefined ? null : sha256(current);
+      if (done.has(target.path)) {
+        const snapshot = snapshots.get(target.path);
+        const before = snapshot?.existed === true ? snapshot.sha256 : null;
+        if (snapshot !== undefined && actual === before) {
+          continue;
+        }
+        drifted.push(
+          `${target.path} was put back by the interrupted reversal and has changed again since`,
+        );
+        continue;
+      }
       const expected = target.exists ? target.sha256 : null;
       if (actual === expected) {
         continue;
@@ -294,14 +550,27 @@ export async function undoBatch(
       );
     }
 
+    // Who is asking. Nothing has been written at this point, and the answer
+    // depends on whether this run starts a reversal or finishes one.
+    //
+    // A reversal that is genuinely half done asks for nothing again, for the
+    // same reason a resume of an apply asks for nothing: the human said yes
+    // before the first byte moved, and finishing what that yes started is
+    // bookkeeping, not a second decision. Refusing there would leave the vault
+    // half reverted with no way out. The waiver rests on evidence rather than on
+    // the record's word, because the record is a file anybody can write: every
+    // target it calls done was just compared with the state this command would
+    // have restored it to, and a record that claims nothing waives nothing.
+    if (done.size === 0) {
+      await assertUndoProof(root, config, batch.batch_id, options.proof);
+    }
+
     if (options.yes !== true) {
       throw new SyncGateError(
         `Reversing batch ${batch.batch_id} rewrites ${String(record.targets.length)} file(s) back to the state recorded before it was applied, and deletes the ones it created. Re-run with --yes once you are sure.`,
       );
     }
 
-    const restored: string[] = [];
-    const removed: string[] = [];
     const kernelTargets = record.targets.filter(
       (target) => target.kind === "preference_ledger" || target.kind === "preference_core",
     );
@@ -309,15 +578,48 @@ export async function undoBatch(
       (target) => target.kind !== "preference_ledger" && target.kind !== "preference_core",
     );
 
+    // Opened before the first byte moves, so an interruption anywhere after this
+    // line is a reversal that can be finished rather than one that is stuck.
+    const started: UndoProgress = progress !== undefined && done.size > 0
+      ? { ...progress, restored: [...restored], removed: [...removed] }
+      : {
+        schema: SYNC_UNDOING_SCHEMA,
+        schema_version: SYNC_SCHEMA_VERSION,
+        batch_id: batch.batch_id,
+        started_at: nowTimestamp(),
+        restored: [],
+        removed: [],
+      };
+    if (done.size === 0) {
+      await writeUndoProgress(progressPath, started);
+    }
+
+    const step = async (target: UndoTargetSnapshot): Promise<void> => {
+      if (done.has(target.path)) {
+        return;
+      }
+      try {
+        await restoreTarget(root, batch.batch_id, target, restored, removed);
+      } catch (error) {
+        throw reversalFailed(batch.batch_id, target, error, done.size);
+      }
+      done.add(target.path);
+      await writeUndoProgress(progressPath, {
+        ...started,
+        restored: [...restored],
+        removed: [...removed],
+      });
+    };
+
     if (kernelTargets.length > 0) {
       await withPreferenceLock(root, async () => {
         for (const target of kernelTargets) {
-          await restoreTarget(root, batch.batch_id, target, restored, removed);
+          await step(target);
         }
       });
     }
     for (const target of otherTargets) {
-      await restoreTarget(root, batch.batch_id, target, restored, removed);
+      await step(target);
     }
 
     const marker: UndoneMarker = {
@@ -329,6 +631,7 @@ export async function undoBatch(
       removed: [...removed].sort(),
     };
     await writeImmutableJson(paths.undone, marker, "The undo marker for this batch");
+    await removeFile(progressPath);
 
     return {
       schema_version: SYNC_SCHEMA_VERSION,

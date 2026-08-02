@@ -12,8 +12,8 @@ One named snapshot of the private engine, captured once, with the list of module
 comparison covers:
 
 - engine: `lrpm-brain-python`
-- snapshot: `2026-07-b`
-- date: `2026-07-27`
+- snapshot: `2026-08-a`
+- date: `2026-08-02`
 
 The snapshot label is opaque on purpose. The reference engine is a private repository, and
 publishing one of its revision identifiers here would tie the two together for anyone reading

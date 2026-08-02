@@ -519,6 +519,51 @@ test("stop enforces the declared load cap and loses nothing doing it", async (t)
   assert.deepEqual(await readdir(join(root, "90_archive", "state")), archives);
 });
 
+test("stop refuses a living state whose lines are over budget, on both hosts", async (t) => {
+  const today = new Date();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const day = String(today.getDate()).padStart(2, "0");
+  const state = [
+    "---",
+    "lifecycle: master",
+    "line_budget_day: 200",
+    "---",
+    "## Current work",
+    `${String(today.getFullYear())}-${month}-${day} (today) ${"x".repeat(400)}`,
+    "",
+  ].join("\n");
+
+  const root = await makeVault("open-brain-hook-lines-", { hooksEnabled: true, state });
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const claude = await runHookProcess("stop", "real", { cwd: root });
+  assert.equal(claude.code, 2);
+  assert.equal(claude.stdout, "");
+  assert.match(claude.stderr, /\[open-brain load\]/u);
+  assert.match(claude.stderr, /budget of 200/u);
+  assert.match(claude.stderr, /10_memory\/_state\.md/u);
+
+  // Codex expresses the same block as JSON on stdout with exit 0. Same guard,
+  // each host's own form.
+  const codex = await runHookProcess("stop", "real", { cwd: root, turn_id: "turn-1" });
+  assert.equal(codex.code, 0);
+  assert.equal(codex.stderr, "");
+  const envelope = parseEnvelope(codex.stdout) as { decision: string; reason: string };
+  assert.equal(envelope.decision, "block");
+  assert.match(envelope.reason, /budget of 200/u);
+
+  // A file back inside its budgets is silent, even though the vault still has
+  // content newer than nothing: the guard only speaks when it has something
+  // to hold against the document.
+  await writeFile(
+    join(root, "10_memory", "_state.md"),
+    state.replace("x".repeat(400), "short"),
+    "utf8",
+  );
+  const quiet = await runHookProcess("stop", "real", { cwd: root });
+  assert.deepEqual(quiet, { code: 0, stdout: "", stderr: "" });
+});
+
 test("a living state with no declared cap is never consolidated", async (t) => {
   const root = await makeVault("open-brain-hook-nocap-", {
     hooksEnabled: true,

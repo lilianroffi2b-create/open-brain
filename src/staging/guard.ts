@@ -53,10 +53,19 @@ const MAX_DEPTH = 4;
 const PREFERENCES_DIRECTORY = "preferences";
 const PROTECTED_FILENAMES: readonly string[] = ["_ledger.json", "_core.md"];
 
+/**
+ * `notebookedit` is on both lists because `filePathOf` already read
+ * `notebook_path` and nothing ever reached it: the tool was in neither set, so
+ * the branch was dead and a notebook write was never evaluated at all. It
+ * writes a file like the others, and the vault template already counts it as a
+ * write tool, so it is wired in rather than deleted.
+ */
 const MUTATING_TOOLS: readonly string[] = [
   "write",
   "edit",
   "multiedit",
+  "notebookedit",
+  "notebook_edit",
   "apply_patch",
   "bash",
   "exec",
@@ -64,11 +73,22 @@ const MUTATING_TOOLS: readonly string[] = [
   "shell",
 ];
 
-const FILE_TOOLS: readonly string[] = ["write", "edit", "multiedit"];
+const FILE_TOOLS: readonly string[] = ["write", "edit", "multiedit", "notebookedit", "notebook_edit"];
 const PATCH_TOOLS: readonly string[] = ["apply_patch"];
 
+/**
+ * Names that run another command and add nothing of their own.
+ *
+ * `xargs` used to be on this list and it does not belong: it supplies operands
+ * from somewhere the guard cannot see, so stripping it left a mutator with an
+ * empty operand list and `echo <path> | xargs rm -f` was allowed. It has its
+ * own analysis now. `busybox` is here for the opposite reason: it is a real
+ * multiplexer, `busybox rm -f x` is `rm -f x`, and it was a spelling of every
+ * mutator that the table did not know.
+ */
 const WRAPPERS: readonly string[] = [
   "builtin",
+  "busybox",
   "command",
   "doas",
   "env",
@@ -80,7 +100,6 @@ const WRAPPERS: readonly string[] = [
   "sudo",
   "time",
   "timeout",
-  "xargs",
 ];
 
 const WRAPPER_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
@@ -132,6 +151,29 @@ const INTERPRETERS: readonly string[] = [
   "php",
   "tsx",
 ];
+
+/**
+ * The flags that make a shell or an interpreter run its next word instead of a
+ * file, in every spelling the program itself accepts.
+ *
+ * The letters are read out of a cluster, because that is how these calls are
+ * really written: `bash -lc`, `sh -cx`, `python3 -uc`, and the argv form a tool
+ * emits, `["bash", "-lc", script]`. A guard that only knows the token `-c`
+ * knows none of them, and it returned before analyzing anything, so the script
+ * it was handed was never opened at all.
+ *
+ * The interpreter set is wider than the shell set on purpose: `-e` is eval for
+ * node, perl and ruby, and errexit for a shell. Matching a letter that turns
+ * out not to be eval costs nothing, since the word it points at is then read as
+ * code and simply contains no write.
+ */
+const SHELL_COMMAND_LETTERS = "c";
+const SHELL_COMMAND_FLAGS: readonly string[] = ["--command"];
+const INTERPRETER_EVAL_LETTERS = "ceEpr";
+const INTERPRETER_EVAL_FLAGS: readonly string[] = ["--eval", "--print", "--exec", "--command"];
+
+/** Interpreters that spell eval as a subcommand rather than as a flag. */
+const EVAL_SUBCOMMAND_RUNTIMES: readonly string[] = ["deno", "bun"];
 
 /**
  * Names the preference CLI is known by. `cli.js` is on the list because it is
@@ -726,9 +768,38 @@ function protectedPathsFor(input: GuardInput): ProtectedPaths {
   };
 }
 
-/** Case-insensitive, separator-normalized, trailing-slash-free form. */
+/**
+ * Whether the filesystem this process runs on folds case in a file name.
+ *
+ * The guard performs no I/O, so it cannot ask the volume and reads the platform
+ * instead. macOS and Windows fold by default and Linux does not, which is the
+ * closest a pure function gets to the truth. A macOS volume formatted
+ * case-sensitively is the one case it reads the wrong way, and it reads it in
+ * the refusing direction.
+ */
+const FOLDS_CASE = process.platform === "darwin" || process.platform === "win32";
+
+/**
+ * Two spellings of the same path, reduced to one string.
+ *
+ * Separators and trailing slashes were already handled. Two things were not.
+ *
+ * Case was folded unconditionally, on every platform. On Linux a file named
+ * `10_MEMORY/preferences/_core.md` is a different file from the kernel, and
+ * writing to it was refused: safe, but a false positive inside the one function
+ * whose stated job is to end them. Folding now follows the platform.
+ *
+ * Unicode was not normalized at all. A vault path holding a non-ASCII character
+ * can be written composed or decomposed, macOS stores one form and accepts
+ * both, and the two spellings reach the same inode while comparing unequal
+ * here: the guard allowed a write to the file it protects. Canonical
+ * composition is what collapses them. Compatibility folding, which this
+ * codebase uses when it matches words rather than paths, would go further and
+ * collapse names that really are different files, so it is not used here.
+ */
 function comparable(path: string): string {
-  return path.replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase();
+  const cleaned = path.replace(/\\/gu, "/").replace(/\/+$/u, "").normalize("NFC");
+  return FOLDS_CASE ? cleaned.toLowerCase() : cleaned;
 }
 
 interface WriteTarget {
@@ -792,11 +863,38 @@ type OperandRule = "all" | "destination" | "none";
 
 interface MutatorRule {
   operands: OperandRule;
+  /** Flags whose next word is their value, so it is not an operand. */
   valueFlags?: readonly string[];
+  /** Short-flag letters with the same effect when they end a cluster. */
+  valueLetters?: string;
+  /** Flags whose value is itself a file the command would write. */
+  targetFlags?: readonly string[];
+  /** Short-flag letters with the same effect: `curl -so out` writes `out`. */
+  targetLetters?: string;
   recursiveFlags?: readonly string[];
   skipFirstOperand?: boolean;
 }
 
+/**
+ * The commands that write, and how each of them names what it writes.
+ *
+ * This table is a denylist, and that is a deliberate choice with a cost that
+ * belongs in writing rather than in a comment claiming completeness. The
+ * alternative was an allowlist of readers: refuse every command not proven to
+ * be a reader when it names a protected path. That posture is stronger against
+ * the unknown and it was rejected for one reason: it refuses reads. `bat`,
+ * `less`, `md5`, `python3 -m json.tool`, any tool a user installs tomorrow,
+ * all of them would refuse on a path they only open for reading, and refusing
+ * reads is the exact failure this file was rewritten to end.
+ *
+ * So the gap is named instead of hidden. A writer that is not on this list and
+ * is not a redirection, an interpreter body, a patch or the preference CLI is
+ * not seen. The list grew from the measured ones: the download tools that took
+ * a protected path as an output flag, the editors driven from a script, the
+ * archive tools that unpack over a directory, the in-place interpreters. What
+ * closes the rest is not this table but the layers after it: `doctor` reports
+ * what resolves into the kernel, and the redline sees the modification.
+ */
 const MUTATORS: Readonly<Record<string, MutatorRule>> = {
   chflags: { operands: "all", skipFirstOperand: true, recursiveFlags: ["R"] },
   chgrp: { operands: "all", skipFirstOperand: true, recursiveFlags: ["R"] },
@@ -807,9 +905,18 @@ const MUTATORS: Readonly<Record<string, MutatorRule>> = {
     valueFlags: ["-t", "--target-directory", "-S", "--suffix"],
     recursiveFlags: ["r", "R", "a"],
   },
+  curl: {
+    operands: "none",
+    targetFlags: ["--output", "--output-dir", "--dump-header", "--trace", "--trace-ascii"],
+    targetLetters: "oD",
+  },
+  ed: { operands: "all", valueLetters: "p" },
+  ex: { operands: "all", valueLetters: "cs" },
   install: { operands: "destination", valueFlags: ["-m", "-o", "-g", "-t", "--mode", "--owner", "--group"] },
   ln: { operands: "all", valueFlags: ["-S", "--suffix", "-t", "--target-directory"] },
+  mkdir: { operands: "all", valueFlags: ["-m", "--mode"] },
   mv: { operands: "all", valueFlags: ["-t", "--target-directory", "-S", "--suffix"] },
+  openssl: { operands: "none", targetFlags: ["-out", "-keyout", "-signkey"] },
   patch: { operands: "all", valueFlags: ["-i", "--input", "-d", "--directory", "-p", "-o", "--output"] },
   rm: { operands: "all", recursiveFlags: ["r", "R"] },
   rmdir: { operands: "all" },
@@ -819,12 +926,34 @@ const MUTATORS: Readonly<Record<string, MutatorRule>> = {
     recursiveFlags: ["r", "a"],
   },
   shred: { operands: "all", valueFlags: ["-n", "-s"] },
+  sponge: { operands: "all" },
   tee: { operands: "all" },
   touch: { operands: "all", valueFlags: ["-d", "-t", "-r", "--date", "--reference"] },
   truncate: { operands: "all", valueFlags: ["-s", "--size", "-r", "--reference"] },
   unlink: { operands: "all" },
+  wget: {
+    operands: "none",
+    targetFlags: ["--output-document", "--directory-prefix", "--output-file"],
+    targetLetters: "OPo",
+  },
   xattr: { operands: "all", skipFirstOperand: true, valueFlags: ["-w", "-d"] },
 };
+
+/** The awk family, whose program hides its redirections from the shell lexer. */
+const AWKS: readonly string[] = ["awk", "gawk", "mawk", "nawk"];
+
+/** Interpreters that edit their operands in place when a cluster carries `i`. */
+const IN_PLACE_INTERPRETERS: readonly string[] = ["perl", "ruby"];
+
+/**
+ * The in-place spelling of those interpreters, and only that one.
+ *
+ * `-i`, `-pi`, `-ni.bak` all edit the files that follow. Matching the letter
+ * anywhere in the cluster would have matched `-MList::Util` too, and a module
+ * name is not an edit, so the cluster is read as the short switches it really
+ * is.
+ */
+const IN_PLACE_CLUSTER = /^-[0nplaswcFe]*i(?:\.[^\s]*)?$/u;
 
 /** git subcommands that touch the working tree, and how they name their targets. */
 const GIT_PATH_SUBCOMMANDS: readonly string[] = ["restore", "checkout", "switch", "rm", "mv"];
@@ -852,8 +981,55 @@ function isFlag(value: string): boolean {
   return value.startsWith("-") && value !== "-" && value !== "--";
 }
 
+/**
+ * A flag as the program reads it, not as one spelling of it happens to look.
+ *
+ * Every check in this file used to compare a whole token to a whole flag, and
+ * two spellings that no program distinguishes went straight through. `-lc` is
+ * how a shell is really called, and a shell splits it into `-l` and `-c`, so
+ * comparing the token to `-c` recognized nothing and the inline script was
+ * never read. `--unattended=true` is what citty accepts everywhere it accepts
+ * `--unattended`, so comparing the token to `--unattended` recognized nothing
+ * and the human gate was simply absent. Both are the same defect: a flag is a
+ * name, an optional attached value, and, when it is short, a cluster of
+ * letters. Everything that keys on a flag now asks this function.
+ */
+interface ParsedFlag {
+  /** The flag without whatever was written after an equals sign. */
+  name: string;
+  /** The value written after an equals sign, if there was one. */
+  attached: string | undefined;
+  /** The letters a clustered short flag carries. Empty for a long flag. */
+  letters: string;
+}
+
+function parseFlag(value: string): ParsedFlag | undefined {
+  if (!isFlag(value)) {
+    return undefined;
+  }
+  const equals = value.indexOf("=");
+  const name = equals === -1 ? value : value.slice(0, equals);
+  const attached = equals === -1 ? undefined : value.slice(equals + 1);
+  return { name, attached, letters: name.startsWith("--") ? "" : name.slice(1) };
+}
+
+/** Whether this word is one of these flags, bare or in the `=value` spelling. */
+function namesFlag(value: string, names: readonly string[]): boolean {
+  const flag = parseFlag(value);
+  return flag !== undefined && names.includes(flag.name);
+}
+
+/** Whether this word is a short cluster carrying one of these letters. */
+function carriesLetter(value: string, letters: string): boolean {
+  const flag = parseFlag(value);
+  if (!flag) {
+    return false;
+  }
+  return [...flag.letters].some((letter) => letters.includes(letter));
+}
+
 function shortFlagLetters(value: string): string {
-  return value.startsWith("--") || !value.startsWith("-") ? "" : value.slice(1);
+  return parseFlag(value)?.letters ?? "";
 }
 
 function mentionsProtectedName(value: string): boolean {
@@ -897,21 +1073,36 @@ function addTarget(context: Context, cwd: string, word: Word, destructive: boole
   context.analysis.targets.push({ raw, cwd, destructive });
 }
 
+/**
+ * The operands of a mutator, with its flags and their values removed.
+ *
+ * Quoting used to disqualify a word from being a flag, and that was never true
+ * of anything: the shell strips the quotes and `sed` reads the same four bytes
+ * whether they were written `-i` or `'-i'`. The rule cost more than a spelling.
+ * `analyzeArgv` marks every token as quoted, because an argv array has no shell
+ * to quote it, so the whole array tool API lost flag recognition at once: `-i`
+ * was filed as a filename, `-r` as a path, and the in-place edit and the
+ * recursive copy behind them were invisible.
+ */
 function collectOperands(words: readonly Word[], rule: MutatorRule): Word[] {
   const operands: Word[] = [];
   const valueFlags = rule.valueFlags ?? [];
+  const valueLetters = rule.valueLetters ?? "";
   for (let index = 1; index < words.length; index += 1) {
     const word = words[index];
     if (!word) {
       continue;
     }
-    if (isFlag(word.value) && !word.quoted) {
-      if (valueFlags.includes(word.value) && !word.value.includes("=")) {
-        index += 1;
-      }
+    if (word.value === "--") {
       continue;
     }
-    if (word.value === "--") {
+    const flag = parseFlag(word.value);
+    if (flag) {
+      const takesValue = valueFlags.includes(flag.name)
+        || (flag.letters.length > 0 && valueLetters.includes(flag.letters.slice(-1)));
+      if (takesValue && flag.attached === undefined) {
+        index += 1;
+      }
       continue;
     }
     operands.push(word);
@@ -925,10 +1116,10 @@ function isRecursive(words: readonly Word[], rule: MutatorRule): boolean {
     return false;
   }
   return words.some((word) => {
-    if (!isFlag(word.value) || word.quoted) {
+    if (!isFlag(word.value)) {
       return false;
     }
-    if (word.value === "--recursive" || word.value === "--archive") {
+    if (namesFlag(word.value, ["--recursive", "--archive"])) {
       return true;
     }
     const short = shortFlagLetters(word.value);
@@ -960,6 +1151,46 @@ function analyzeRedirections(context: Context, segment: Segment, cwd: string): v
   }
 }
 
+/**
+ * The files a command names through a flag rather than through an operand.
+ *
+ * `curl -so <path>` is the shape that mattered: the output flag is the last
+ * letter of a cluster, so the path is the next word, and a table that only
+ * knew operands never looked at it.
+ */
+function flagTarget(words: readonly Word[], index: number, rule: MutatorRule): Word | undefined {
+  const word = words[index];
+  if (!word) {
+    return undefined;
+  }
+  const flag = parseFlag(word.value);
+  if (!flag) {
+    return undefined;
+  }
+  const named = (rule.targetFlags ?? []).includes(flag.name);
+  const lettered = flag.letters.length > 0
+    && (rule.targetLetters ?? "").includes(flag.letters.slice(-1));
+  if (!named && !lettered) {
+    return undefined;
+  }
+  if (flag.attached !== undefined) {
+    const expanded = word.expanded;
+    return {
+      value: flag.attached,
+      expanded: expanded === undefined ? undefined : expanded.slice(expanded.indexOf("=") + 1),
+      quoted: word.quoted,
+      substitutions: word.substitutions,
+    };
+  }
+  return words[index + 1];
+}
+
+/** `-t dir` and `--target-directory=dir` name the destination, not an operand. */
+const TARGET_DIRECTORY_RULE: MutatorRule = {
+  operands: "none",
+  targetFlags: ["-t", "--target-directory"],
+};
+
 function analyzeMutator(context: Context, name: string, words: readonly Word[], cwd: string): void {
   const rule = MUTATORS[name];
   if (!rule) {
@@ -967,14 +1198,27 @@ function analyzeMutator(context: Context, name: string, words: readonly Word[], 
   }
   const operands = collectOperands(words, rule);
   const recursive = isRecursive(words, rule);
-  const targetDirectoryFlag = words.findIndex(
-    (word) => word.value === "-t" || word.value === "--target-directory",
-  );
-  if (rule.operands === "destination" && targetDirectoryFlag !== -1) {
-    const target = words[targetDirectoryFlag + 1];
-    if (target) {
-      addTarget(context, cwd, target, true);
+  let destinationFlag: Word | undefined;
+  for (let index = 1; index < words.length; index += 1) {
+    const flagged = flagTarget(words, index, rule);
+    if (flagged) {
+      addTarget(context, cwd, flagged, true);
     }
+    destinationFlag = flagTarget(words, index, TARGET_DIRECTORY_RULE) ?? destinationFlag;
+  }
+  if (destinationFlag) {
+    // `-t dir` is the destination whatever the rest of the line looks like.
+    // Reading it only for the commands whose last operand is a destination
+    // meant `mv -t <kernel> forged.md` named its target and was not seen.
+    addTarget(context, cwd, destinationFlag, true);
+  }
+  if (rule.operands === "none") {
+    // The command names what it writes through a flag. Its operands are a URL,
+    // a subcommand or an input file, and calling any of them a write target
+    // refused `openssl dgst <file>`, which only reads.
+    return;
+  }
+  if (rule.operands === "destination" && destinationFlag) {
     return;
   }
   if (rule.operands === "destination") {
@@ -1009,8 +1253,7 @@ function analyzeDd(context: Context, words: readonly Word[], cwd: string): void 
 
 function analyzeSed(context: Context, words: readonly Word[], cwd: string): void {
   const inPlace = words.some(
-    (word) => !word.quoted
-      && (word.value === "-i" || word.value.startsWith("-i") || word.value.startsWith("--in-place")),
+    (word) => word.value.startsWith("-i") || word.value.startsWith("--in-place"),
   );
   if (!inPlace) {
     return;
@@ -1026,6 +1269,145 @@ function analyzeSed(context: Context, words: readonly Word[], cwd: string): void
   }
 }
 
+/**
+ * An interpreter that edits its operands in place, the way `sed -i` does.
+ *
+ * `perl -pi -e 's/a/b/' <file>` rewrites the file without ever naming it inside
+ * the body, so reading the body proves nothing. What proves it is the cluster.
+ */
+function analyzeInPlaceInterpreter(
+  context: Context,
+  name: string,
+  words: readonly Word[],
+  cwd: string,
+): void {
+  if (!IN_PLACE_INTERPRETERS.includes(name)) {
+    return;
+  }
+  if (!words.some((word) => IN_PLACE_CLUSTER.test(word.value))) {
+    return;
+  }
+  const rule: MutatorRule = {
+    operands: "all",
+    valueFlags: ["-e", "-E", "-m", "-M", "-I", "-F", "-r", "--eval"],
+    valueLetters: "eEmMIFr",
+  };
+  for (const file of collectOperands(words, rule)) {
+    addTarget(context, cwd, file, false);
+  }
+}
+
+/**
+ * The redirections of an awk program, which the shell lexer never sees.
+ *
+ * `awk 'BEGIN{print "x" > "<path>"}'` is one quoted word to the shell, so the
+ * `>` inside it is not an operator and no redirection was ever recorded. The
+ * program is read here instead, and only a redirection into a literal counts:
+ * matching a bare `>` would have called `$1 > 5` a write.
+ */
+function analyzeAwk(context: Context, words: readonly Word[], cwd: string): void {
+  if (words.some((word) => namesFlag(word.value, ["-f", "--file"]))) {
+    // The program lives in a file this function does not read, exactly as
+    // `sed -f` does. Nothing here can say what it writes, and nothing here
+    // pretends to.
+    return;
+  }
+  const rule: MutatorRule = { operands: "all", valueFlags: ["-v", "--assign"], valueLetters: "v" };
+  const program = collectOperands(words, rule)[0];
+  const source = program?.expanded;
+  if (source === undefined) {
+    return;
+  }
+  for (const match of source.matchAll(/>>?\s*(["'])([^"'\n]*)\1/gu)) {
+    const literal = match[2] ?? "";
+    if (literal.length > 0) {
+      addTarget(context, cwd, { value: literal, expanded: literal, quoted: true, substitutions: [] }, false);
+    }
+  }
+  if (!/\bsystem\s*\(/u.test(source)) {
+    return;
+  }
+  const inner = /\bsystem\s*\(\s*(["'])([^"'\n]*)\1\s*\)/u.exec(source);
+  if (!inner) {
+    throw new GuardRefusal(
+      "opaque-interpreter-write",
+      "This awk program shells out with a command it builds at runtime, so what it would run cannot be established.",
+    );
+  }
+  analyzeCommandText(context, inner[2] ?? "", cwd, context.depth + 1);
+}
+
+/** The primaries that make `find` write rather than list. */
+const FIND_DESTRUCTIVE: readonly string[] = ["-delete", "-fprint", "-fprintf", "-fls"];
+const FIND_EXEC: readonly string[] = ["-exec", "-execdir", "-ok", "-okdir"];
+/** Options `find` accepts before the paths it walks, none of which take a value. */
+const FIND_PRE_PATH_FLAGS: readonly string[] = ["-H", "-L", "-P", "-E", "-d", "-s", "-x"];
+
+/**
+ * What a `find` expression would do to the directories it walks.
+ *
+ * The paths are operands, but the write is a primary buried in the expression,
+ * so a table keyed on the command name saw a reader. `-delete` and an `-exec`
+ * that runs a mutator both make every starting path a destructive target, and
+ * the exec command is analyzed on its own so an explicit path inside it counts
+ * too.
+ */
+function analyzeFind(context: Context, words: readonly Word[], cwd: string): void {
+  const roots: Word[] = [];
+  let expression = words.length;
+  for (let index = 1; index < words.length; index += 1) {
+    const word = words[index];
+    if (!word) {
+      continue;
+    }
+    if (FIND_PRE_PATH_FLAGS.includes(word.value)) {
+      continue;
+    }
+    if (isFlag(word.value) || word.value === "(" || word.value === "!") {
+      expression = index;
+      break;
+    }
+    roots.push(word);
+  }
+
+  let destructive = false;
+  for (let index = expression; index < words.length; index += 1) {
+    const word = words[index];
+    if (!word) {
+      continue;
+    }
+    if (FIND_DESTRUCTIVE.includes(word.value)) {
+      destructive = true;
+      continue;
+    }
+    if (!FIND_EXEC.includes(word.value)) {
+      continue;
+    }
+    const end = words.findIndex(
+      (candidate, position) => position > index && (candidate.value === ";" || candidate.value === "+"),
+    );
+    const inner = words.slice(index + 1, end === -1 ? words.length : end);
+    if (inner.length === 0) {
+      continue;
+    }
+    const command = basename(inner[0]?.expanded ?? inner[0]?.value ?? "").toLowerCase();
+    if (MUTATORS[command] || command === "sed" || command === "tar" || SHELLS.includes(command)) {
+      destructive = true;
+    }
+    analyzeCommand(context, inner, cwd, [], false);
+  }
+
+  if (!destructive) {
+    return;
+  }
+  for (const root of roots) {
+    addTarget(context, cwd, root, true);
+  }
+  if (roots.length === 0) {
+    addTarget(context, cwd, { value: cwd, expanded: cwd, quoted: false, substitutions: [] }, true);
+  }
+}
+
 function analyzeTar(context: Context, words: readonly Word[], cwd: string): void {
   const extracting = words.some(
     (word) => word.value === "-x" || word.value === "--extract" || /^-[^-]*x/u.test(word.value),
@@ -1033,13 +1415,89 @@ function analyzeTar(context: Context, words: readonly Word[], cwd: string): void
   if (!extracting) {
     return;
   }
-  const directoryFlag = words.findIndex((word) => word.value === "-C" || word.value === "--directory");
-  const destination = directoryFlag === -1 ? undefined : words[directoryFlag + 1];
-  if (destination) {
-    addTarget(context, cwd, destination, true);
-    return;
+  const rule: MutatorRule = { operands: "none", targetFlags: ["-C", "--directory"] };
+  for (let index = 1; index < words.length; index += 1) {
+    const destination = flagTarget(words, index, rule);
+    if (destination) {
+      addTarget(context, cwd, destination, true);
+      return;
+    }
   }
   addTarget(context, cwd, { value: cwd, expanded: cwd, quoted: false, substitutions: [] }, true);
+}
+
+/**
+ * `unzip` unpacks over `-d` when it is given one, and over the cwd when it is
+ * not. The listing letters only mean a listing when nothing on the line asks
+ * for an extraction, since `-o` and `-d` put one back.
+ */
+function analyzeUnzip(context: Context, words: readonly Word[], cwd: string): void {
+  const rule: MutatorRule = { operands: "none", targetFlags: ["-d"], targetLetters: "d" };
+  const extracts = words.some((word) => carriesLetter(word.value, "od"));
+  if (!extracts && words.some((word) => carriesLetter(word.value, "lptvz"))) {
+    return;
+  }
+  for (let index = 1; index < words.length; index += 1) {
+    const destination = flagTarget(words, index, rule);
+    if (destination) {
+      addTarget(context, cwd, destination, true);
+      return;
+    }
+  }
+  addTarget(context, cwd, { value: cwd, expanded: cwd, quoted: false, substitutions: [] }, true);
+}
+
+/**
+ * `xargs` runs a command on operands it reads from somewhere else.
+ *
+ * It used to be a transparent wrapper, so the guard analyzed `rm -f` with no
+ * operands at all and allowed it: `echo <path> | xargs rm -f` deleted a file
+ * the guard had just read the name of. What is written on the line is still
+ * analyzed, because `xargs rm <path>` puts the path there. What comes from the
+ * pipe is not readable here, so a mutator fed by one is recorded as a target
+ * that could not be resolved, which is the same answer this guard already gives
+ * to `rm "$UNKNOWN"`: refuse when the command names a protected file, allow
+ * when it does not.
+ */
+function analyzeXargs(context: Context, words: readonly Word[], cwd: string, fed: boolean): void {
+  const valueFlags = WRAPPER_VALUE_FLAGS.xargs ?? [];
+  let index = 1;
+  while (index < words.length) {
+    const word = words[index];
+    const flag = word === undefined ? undefined : parseFlag(word.value);
+    if (!flag) {
+      break;
+    }
+    const takesValue = valueFlags.includes(flag.name)
+      || (flag.letters.length > 0 && XARGS_VALUE_LETTERS.includes(flag.letters.slice(-1)));
+    index += takesValue && flag.attached === undefined ? 2 : 1;
+  }
+  const inner = words.slice(index);
+  if (inner.length === 0) {
+    return;
+  }
+  analyzeCommand(context, inner, cwd, [], false);
+  const readsFromElsewhere = fed || words.some((word) => namesFlag(word.value, ["-a", "--arg-file"]));
+  if (!readsFromElsewhere) {
+    return;
+  }
+  const resolved = resolveCommand(context, inner);
+  const name = basename(resolved[0]?.expanded ?? resolved[0]?.value ?? "").toLowerCase();
+  if (isWriter(name)) {
+    addTarget(context, cwd, { value: "", expanded: undefined, quoted: false, substitutions: [] }, true);
+  }
+}
+
+/** The xargs options that consume the word after them rather than start a command. */
+const XARGS_VALUE_LETTERS = "nIiPdasEeLl";
+
+/** Whether this file knows the named command to be capable of a write. */
+function isWriter(name: string): boolean {
+  return MUTATORS[name] !== undefined
+    || AWKS.includes(name)
+    || SHELLS.includes(name)
+    || INTERPRETERS.includes(name)
+    || ["apply_patch", "dd", "find", "git", "sed", "tar", "unzip"].includes(name);
 }
 
 function gitEffectiveCwd(words: readonly Word[], cwd: string): string {
@@ -1048,8 +1506,14 @@ function gitEffectiveCwd(words: readonly Word[], cwd: string): string {
     if (!word) {
       continue;
     }
-    if ((word.value === "-C" || word.value === "--work-tree") && words[index + 1]?.expanded) {
-      const directory = words[index + 1]?.expanded ?? "";
+    const flag = parseFlag(word.value);
+    if (!flag || !["-C", "--work-tree"].includes(flag.name)) {
+      continue;
+    }
+    const directory = flag.attached === undefined
+      ? words[index + 1]?.expanded
+      : word.expanded?.slice(word.expanded.indexOf("=") + 1);
+    if (directory !== undefined && directory.length > 0) {
       return isAbsolute(directory) ? resolve(directory) : resolve(cwd, directory);
     }
   }
@@ -1066,8 +1530,9 @@ function analyzeGit(context: Context, words: readonly Word[], cwd: string): void
     if (!word) {
       continue;
     }
-    if (isFlag(word.value)) {
-      if (valueFlags.includes(word.value)) {
+    const flag = parseFlag(word.value);
+    if (flag) {
+      if (flag.attached === undefined && valueFlags.includes(flag.name)) {
         index += 1;
       }
       continue;
@@ -1134,12 +1599,41 @@ function analyzeCode(context: Context, code: string, cwd: string): void {
       "This interpreter body writes, and it builds at least one of its strings from an encoding, so the file it would touch cannot be established from the command. It is refused rather than guessed.",
     );
   }
-  const literals = [...code.matchAll(/'([^'\n]*)'|"([^"\n]*)"/gu)]
-    .map((match) => match[1] ?? match[2] ?? "")
-    .filter((value) => value.length > 0);
-  for (const literal of literals) {
+  for (const literal of codeLiterals(code)) {
     addTarget(context, cwd, { value: literal, expanded: literal, quoted: true, substitutions: [] }, false);
   }
+}
+
+/**
+ * The strings an interpreter body could be naming a file with.
+ *
+ * Each literal counts on its own, and so does every run of literals the
+ * language would join into one. `open('.../pref' 'erences/_core.md','w')` is a
+ * single path to Python and it was two harmless fragments here, which is the
+ * same trick as `chr(49)` and base64: split the name so no piece matches. Those
+ * two are refused outright because their result cannot be computed. A
+ * concatenation can be, so it is computed rather than refused, and the run is
+ * added alongside its pieces instead of replacing them.
+ */
+function codeLiterals(code: string): string[] {
+  const matches = [...code.matchAll(/'([^'\n]*)'|"([^"\n]*)"/gu)];
+  const literals: string[] = [];
+  let run = "";
+  let runEnd = -1;
+  for (const match of matches) {
+    const value = match[1] ?? match[2] ?? "";
+    const start = match.index ?? 0;
+    const joined = runEnd !== -1 && /^\s*\+?\s*$/u.test(code.slice(runEnd, start));
+    run = joined ? run + value : value;
+    runEnd = start + match[0].length;
+    if (value.length > 0) {
+      literals.push(value);
+    }
+    if (joined && run.length > 0) {
+      literals.push(run);
+    }
+  }
+  return literals;
 }
 
 function patchTargets(patch: string): string[] {
@@ -1169,7 +1663,7 @@ function analyzePreferenceCli(context: Context, words: readonly Word[]): void {
   // human switched off. A tool call is exactly the caller that must never have
   // it: on a vault where the hooks capability is armed, that proof is the whole
   // reason this guard runs at all.
-  if (words.some((word) => (word.expanded ?? word.value) === "--unattended")) {
+  if (words.some((word) => namesFlag(word.expanded ?? word.value, ["--unattended"]))) {
     context.analysis.unattendedKernelWrite = true;
   }
 
@@ -1320,8 +1814,9 @@ function resolveCommand(context: Context, words: readonly Word[]): Word[] {
       if (!word) {
         break;
       }
-      if (isFlag(word.value)) {
-        index += valueFlags.includes(word.value) ? 2 : 1;
+      const flag = parseFlag(word.value);
+      if (flag) {
+        index += flag.attached === undefined && valueFlags.includes(flag.name) ? 2 : 1;
         continue;
       }
       if (positionals > 0) {
@@ -1337,10 +1832,62 @@ function resolveCommand(context: Context, words: readonly Word[]): Word[] {
 }
 
 /**
+ * Every word this call would run as a program rather than read as data.
+ *
+ * The flag can carry its program in the next word, `bash -lc script`, or in
+ * itself, `node --eval=script`. Both are collected, and every matching flag is,
+ * not only the first: `perl -pi -e script` names one flag that is not eval and
+ * one that is, and stopping at the first match read the wrong word.
+ */
+function inlinePrograms(
+  words: readonly Word[],
+  letters: string,
+  flags: readonly string[],
+): string[] {
+  const bodies: string[] = [];
+  for (let index = 1; index < words.length; index += 1) {
+    const word = words[index];
+    if (!word) {
+      continue;
+    }
+    const raw = word.expanded ?? word.value;
+    if (!namesFlag(raw, flags) && !carriesLetter(raw, letters)) {
+      continue;
+    }
+    const attached = parseFlag(raw)?.attached;
+    if (attached !== undefined) {
+      bodies.push(attached);
+      continue;
+    }
+    const body = words[index + 1]?.expanded;
+    if (body !== undefined) {
+      bodies.push(body);
+    }
+  }
+  return bodies;
+}
+
+/** The program of a runtime that spells eval as a subcommand: `deno eval x`. */
+function evalSubcommandProgram(words: readonly Word[]): string | undefined {
+  const start = words.findIndex((word, index) => index > 0 && (word.expanded ?? word.value) === "eval");
+  if (start === -1) {
+    return undefined;
+  }
+  for (let index = start + 1; index < words.length; index += 1) {
+    const word = words[index];
+    if (!word || isFlag(word.value)) {
+      continue;
+    }
+    return word.expanded;
+  }
+  return undefined;
+}
+
+/**
  * Whether this command, fed by a pipe, would execute what the pipe carries.
  *
  * A shell or an interpreter with no program of its own runs standard input.
- * With `-c`, `-e`, or a script operand it runs that instead, and the pipe is
+ * With an eval flag or a script operand it runs that instead, and the pipe is
  * just data: `cat notes | python3 report.py` stays readable, `cat program | sh`
  * does not.
  */
@@ -1349,7 +1896,9 @@ function readsProgramFromStdin(name: string, words: readonly Word[]): boolean {
     return false;
   }
   return !words.slice(1).some(
-    (word) => word.value === "-c" || word.value === "-e" || !isFlag(word.value),
+    (word) => carriesLetter(word.value, INTERPRETER_EVAL_LETTERS)
+      || namesFlag(word.value, INTERPRETER_EVAL_FLAGS)
+      || !isFlag(word.value),
   );
 }
 
@@ -1363,6 +1912,23 @@ function analyzeSegment(context: Context, segment: Segment, cwd: string): string
     }
   }
 
+  return analyzeCommand(context, rawWords, cwd, segment.heredocs, segment.pipedInto);
+}
+
+/**
+ * What one command does, once its redirections have been read.
+ *
+ * It is separate from the segment so that a command carrying another one,
+ * `xargs rm` or `find -exec rm`, can be judged by the same tables instead of
+ * being waved through as a wrapper.
+ */
+function analyzeCommand(
+  context: Context,
+  rawWords: readonly Word[],
+  cwd: string,
+  heredocs: readonly string[],
+  pipedInto: boolean,
+): string {
   const words = resolveCommand(context, rawWords);
   const first = words[0];
   if (!first) {
@@ -1384,7 +1950,7 @@ function analyzeSegment(context: Context, segment: Segment, cwd: string): string
   // A command that reads its program from a pipe is a program this guard never
   // sees. `printf "..." | bash` and `echo <base64> | base64 -d | sh` are the
   // same call as the text they carry, and the text is not here to be read.
-  if (segment.pipedInto && readsProgramFromStdin(name, words)) {
+  if (pipedInto && readsProgramFromStdin(name, words)) {
     throw new GuardRefusal(
       "pipe-into-interpreter",
       "This pipes into an interpreter, which runs a program this guard cannot read.",
@@ -1415,24 +1981,27 @@ function analyzeSegment(context: Context, segment: Segment, cwd: string): string
   }
 
   if (SHELLS.includes(name)) {
-    const commandFlag = words.findIndex((word) => word.value === "-c");
-    const inline = commandFlag === -1 ? undefined : words[commandFlag + 1]?.expanded;
-    if (inline !== undefined) {
+    for (const inline of inlinePrograms(words, SHELL_COMMAND_LETTERS, SHELL_COMMAND_FLAGS)) {
       analyzeCommandText(context, inline, cwd, context.depth + 1);
     }
-    for (const body of segment.heredocs) {
+    for (const body of heredocs) {
       analyzeCommandText(context, body, cwd, context.depth + 1);
     }
     return cwd;
   }
 
   if (INTERPRETERS.includes(name)) {
-    const commandFlag = words.findIndex((word) => word.value === "-c" || word.value === "-e");
-    const inline = commandFlag === -1 ? undefined : words[commandFlag + 1]?.expanded;
-    if (inline !== undefined) {
+    for (const inline of inlinePrograms(words, INTERPRETER_EVAL_LETTERS, INTERPRETER_EVAL_FLAGS)) {
       analyzeCode(context, inline, cwd);
     }
-    for (const body of segment.heredocs) {
+    if (EVAL_SUBCOMMAND_RUNTIMES.includes(name)) {
+      const inline = evalSubcommandProgram(words);
+      if (inline !== undefined) {
+        analyzeCode(context, inline, cwd);
+      }
+    }
+    analyzeInPlaceInterpreter(context, name, words, cwd);
+    for (const body of heredocs) {
       analyzeCode(context, body, cwd);
     }
     return cwd;
@@ -1440,7 +2009,7 @@ function analyzeSegment(context: Context, segment: Segment, cwd: string): string
 
   if (name === "apply_patch") {
     const inline = words[1]?.expanded;
-    for (const body of [...segment.heredocs, ...(inline === undefined ? [] : [inline])]) {
+    for (const body of [...heredocs, ...(inline === undefined ? [] : [inline])]) {
       for (const target of patchTargets(body)) {
         addTarget(context, cwd, { value: target, expanded: target, quoted: true, substitutions: [] }, true);
       }
@@ -1463,8 +2032,28 @@ function analyzeSegment(context: Context, segment: Segment, cwd: string): string
     return cwd;
   }
 
+  if (AWKS.includes(name)) {
+    analyzeAwk(context, words, cwd);
+    return cwd;
+  }
+
+  if (name === "find") {
+    analyzeFind(context, words, cwd);
+    return cwd;
+  }
+
   if (name === "tar") {
     analyzeTar(context, words, cwd);
+    return cwd;
+  }
+
+  if (name === "unzip") {
+    analyzeUnzip(context, words, cwd);
+    return cwd;
+  }
+
+  if (name === "xargs") {
+    analyzeXargs(context, words, cwd, pipedInto);
     return cwd;
   }
 

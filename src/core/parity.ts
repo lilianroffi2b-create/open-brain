@@ -20,8 +20,8 @@ export interface ParityReference {
 export const PARITY_REFERENCE: ParityReference = {
   schema_version: 1,
   engine: "lrpm-brain-python",
-  snapshot: "2026-07-b",
-  date: "2026-07-27",
+  snapshot: "2026-08-a",
+  date: "2026-08-02",
   // Package version at the moment of the capture. It records when the snapshot
   // was taken, so it does not follow later releases.
   captured_by: "0.1.0-alpha.2",
@@ -74,12 +74,12 @@ export const PARITY_REFERENCE: ParityReference = {
     {
       name: "gate",
       area: "gate",
-      note: "Human validation, item by item, before anything reaches the kernel.",
+      note: "Human validation, item by item, before anything reaches the kernel, with the age of a batch stated so a stale one is never presented as new.",
     },
     {
       name: "hooks",
       area: "hooks",
-      note: "Single hook entry point and idempotent host wiring.",
+      note: "Single hook entry point, idempotent host wiring, and the living state held to the load cap and the per-line budgets it declares for itself.",
     },
     {
       name: "learning",

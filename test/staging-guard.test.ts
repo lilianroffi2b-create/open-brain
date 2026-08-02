@@ -18,6 +18,9 @@ const VAULT = "/tmp/openbrain-guard-vault";
 const LEDGER = "10_memory/preferences/_ledger.json";
 const CORE = "10_memory/preferences/_core.md";
 
+/** The same rule the guard applies: the platform decides, not this file. */
+const FOLDS_CASE = process.platform === "darwin" || process.platform === "win32";
+
 function bash(command: string, cwd?: string): GuardVerdict {
   return evaluateGuard({
     tool: "Bash",
@@ -242,13 +245,16 @@ test("mutating the kernel through the preference CLI is refused", () => {
 // ---------------------------------------------------------------------------
 
 test("the file tools are judged on the path they would write", () => {
-  for (const tool of ["Write", "Edit", "MultiEdit"]) {
+  for (const tool of ["Write", "Edit", "MultiEdit", "NotebookEdit"]) {
     for (const path of [
       CORE,
       LEDGER,
       `${VAULT}/${CORE}`,
       `40_sources/../${LEDGER}`,
-      "10_MEMORY/PREFERENCES/_CORE.MD",
+      // A name differing only in case is the same file where the filesystem
+      // folds case and a different one where it does not, so the row it
+      // belongs to is the platform's, not this file's.
+      ...(FOLDS_CASE ? ["10_MEMORY/PREFERENCES/_CORE.MD"] : []),
       "10_memory/preferences/subdir/../_ledger.json",
       "10_memory/preferences/anything-else.json",
     ]) {

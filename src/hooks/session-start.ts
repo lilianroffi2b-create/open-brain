@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { capText, type ContextBudget } from "../core/budget.js";
+import { capText, truncationNotice, type ContextBudget } from "../core/budget.js";
 import type { VaultConfig } from "../core/types.js";
 import { sessionStartStagingReminder } from "../staging/capture.js";
 import {
@@ -27,6 +27,14 @@ export const MIN_SECTION_CHARS = 400;
 export const FALLBACK_LINE_CHARS = 320;
 export const FALLBACK_MAX_LINES = 40;
 const FRESHNESS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Below this much room left in a section, the head of a line teaches nothing
+ * and costs more than it is worth, so the line is announced as dropped instead.
+ */
+export const MIN_CUT_CHARS = 400;
+
+const CUT_MARKER = "...";
 
 /**
  * Headings whose content is session state rather than instructions. Matching is
@@ -144,10 +152,67 @@ export interface SessionContextBlock {
   budget: ContextBudget;
 }
 
+interface CappedSection {
+  text: string;
+  cut: boolean;
+}
+
+export function cutNotice(sectionTitle: string, stateRelative: string): string {
+  return `[open-brain] CUT: the last injected line of section ${sectionTitle} is cut mid-sentence. Open ${stateRelative} to read it in full.`;
+}
+
+/**
+ * Caps one section, dropping whole lines from the end like capText does, with
+ * one difference that matters: a line too long to fit is no longer thrown away
+ * whole. A state file that packs a whole day onto one very long line would
+ * otherwise inject nothing at all for that section, every session, replaced by
+ * a bare truncation notice. The head of a line beats nothing at all, so the
+ * line is cut to whatever room is left, marked as cut, and the caller says so.
+ *
+ * Below MIN_CUT_CHARS of remaining room the head is not worth its place and the
+ * line is dropped instead, which the truncation notice already reports.
+ */
+function capStateSection(lines: readonly string[], maxChars: number): CappedSection {
+  const joined = lines.join("\n");
+  if (joined.length <= maxChars) {
+    return { text: joined, cut: false };
+  }
+
+  // Room for the notice is reserved up front, in its longest form, so the
+  // result never exceeds maxChars even though the notice quotes final counts.
+  const reserve = truncationNotice(lines.length, lines.length, maxChars).length + 1;
+  const room = maxChars - reserve;
+  const kept: string[] = [];
+  let used = 0;
+  let cut = false;
+
+  for (const line of lines) {
+    const separator = kept.length === 0 ? 0 : 1;
+    if (used + line.length + separator > room) {
+      const remaining = room - used - separator - CUT_MARKER.length;
+      if (remaining >= MIN_CUT_CHARS) {
+        kept.push(line.slice(0, remaining).trimEnd() + CUT_MARKER);
+        cut = true;
+      }
+      break;
+    }
+    kept.push(line);
+    used += line.length + separator;
+  }
+
+  const dropped = lines.length - kept.length;
+  const parts = dropped > 0
+    ? [...kept, truncationNotice(kept.length, lines.length, maxChars)]
+    : [...kept];
+  return { text: parts.join("\n"), cut };
+}
+
 /**
  * Builds the injected block under a hard character cap, splitting the budget
- * across sections so a long first section can never silence a later one, and
- * leaving a truncation notice wherever it cut.
+ * across sections so a long first section can never silence a later one, never
+ * discarding a line whole for being too long, and naming every section it had
+ * to shorten. Nothing is amputated in silence: what was dropped is counted and
+ * what was cut mid-sentence says so, with the file to open for the rest.
  */
 export function buildSessionContext(
   statusLine: string,
@@ -171,7 +236,12 @@ export function buildSessionContext(
   const header = `[open-brain] Living state, from ${stateRelative}:`;
   const perSection = Math.max(MIN_SECTION_CHARS, Math.floor(maxChars / sections.length));
   const parts = sections
-    .map((section) => capText(section.lines.join("\n"), perSection).text)
+    .flatMap((section) => {
+      const capped = capStateSection(section.lines, perSection);
+      return capped.cut
+        ? [capped.text, cutNotice(section.title, stateRelative)]
+        : [capped.text];
+    })
     .filter((part) => part.length > 0);
   const merged = [statusLine, header, ...parts].join("\n");
   const capped = capText(merged, maxChars, totalLines + 1);

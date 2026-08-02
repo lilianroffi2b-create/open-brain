@@ -152,7 +152,15 @@ test("the whole protocol runs through the CLI and prints one JSON document per s
   assert.equal(validated.output.phase, "complete");
   assert.equal(validated.output.undo_available, true);
 
-  const undone = await runSync(["undo", batchId, "--root", root, "--yes"]);
+  // Undo writes to the same kernel, so it asks for the same two things as
+  // validate, on top of its own --yes.
+  const undone = await runSync([
+    "undo", batchId,
+    "--root", root,
+    "--yes",
+    "--confirm", token,
+    "--unattended",
+  ]);
   assert.equal(undone.output.already_undone, false);
   assert.ok(Array.isArray(undone.output.restored));
 });

@@ -32,6 +32,15 @@ for a batch in phase `proposed`. Use `resume` for `needs_resume`,
 `decision_needs_resume`, `decided`, `applying`, `apply_failed` or
 `complete_needs_compact`.
 
+**Freshness.** `pending` and `show` both return `prepared_at`, `age_days` and
+`stale`, and `pending` also returns a `stale_count`. When `stale` is true, read
+`10_memory/_state.md` in full **before presenting anything**, then confront each
+item with the real state of the work. The gate measures the age; it cannot judge
+whether an item is still true, because that is semantic and therefore your job.
+An item that has become false is presented as false, with what changed, never as
+one more neutral option in the list. A batch with no readable `prepared_at` is
+stale by default: an unknown age is not a young one.
+
 Only if no batch is active:
 
 ```
@@ -115,7 +124,7 @@ note really reached the vault, then archives a finished batch.
 open-brain sync pending
 open-brain sync show --batch <batch_id>
 open-brain sync resume --batch <batch_id>
-open-brain sync undo <batch_id> --yes
+open-brain sync undo <batch_id> --yes --confirm <token>
 ```
 
 `undo` reverses an applied batch from the record written next to it: the state

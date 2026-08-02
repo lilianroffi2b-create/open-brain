@@ -1,4 +1,5 @@
 import { ExpectedError } from "../core/errors.js";
+import { sha256 } from "../core/text.js";
 import {
   PREFERENCE_LEDGER_SCHEMA_VERSION,
   type Preference,
@@ -282,7 +283,15 @@ export function getCorePreferences(ledger: PreferenceLedger): Preference[] {
 
 export const PREFERENCE_OPERATION_REQUEST_SCHEMA = "open-brain-prefs-operation-request/v1";
 
-/** Operation records kept for replay detection, oldest dropped first. */
+/**
+ * Operation records kept with their request in full, most recent first.
+ *
+ * Older ones are compacted, never dropped. An operation identifier that is
+ * forgotten is an operation that can be applied a second time, and the second
+ * time is not a replay: it is a write nobody asked for, landing on a preference
+ * a human may have deliberately moved since. The cap bounds how much of the
+ * ledger is readable history, not how long idempotency lasts.
+ */
 export const MAX_OPERATION_HISTORY = 200;
 
 /**
@@ -308,11 +317,29 @@ export interface PreferenceOperationRequest {
   source: string | null;
 }
 
+/**
+ * A frozen request as the ledger holds it: whole for a recent operation, and
+ * reduced to what identifies it for a compacted one. It is also what a record
+ * written by an older build looks like, a request missing the fields that did
+ * not exist yet, which is why every reader of it treats absence as absence.
+ */
+export type StoredOperationRequest =
+  & Partial<PreferenceOperationRequest>
+  & Pick<PreferenceOperationRequest, "schema" | "kind" | "id">;
+
 export interface PreferenceOperationRecord {
   operation_id: string;
   applied_at: string;
   target_id: string;
-  request: PreferenceOperationRequest;
+  request: StoredOperationRequest;
+  /**
+   * Digest of the frozen request. It is what still answers "was this the same
+   * call" once the request itself has been compacted away, and it is written on
+   * every new record so a compaction never has to reconstruct one.
+   */
+  request_sha256?: string;
+  /** True once the full request was replaced by its digest. */
+  compacted?: boolean;
 }
 
 export interface PreferenceAddOperation extends PreferenceAddInput {
@@ -337,7 +364,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isOperationRequest(value: unknown): value is PreferenceOperationRequest {
+function isOperationRequest(value: unknown): value is StoredOperationRequest {
   return isRecord(value)
     && value.schema === PREFERENCE_OPERATION_REQUEST_SCHEMA
     && (value.kind === "add" || value.kind === "log")
@@ -349,7 +376,8 @@ function isOperationRecord(value: unknown): value is PreferenceOperationRecord {
     && typeof value.operation_id === "string"
     && typeof value.applied_at === "string"
     && typeof value.target_id === "string"
-    && isOperationRequest(value.request);
+    && isOperationRequest(value.request)
+    && (value.request_sha256 === undefined || typeof value.request_sha256 === "string");
 }
 
 /** Reads the bounded operation index, ignoring entries an older writer malformed. */
@@ -437,14 +465,84 @@ function requestsMatch(
     && sameStringList(stored.domains, requested.domains);
 }
 
+/**
+ * The digest the replay check compares when the request itself is gone.
+ *
+ * Built from the same fields, in the same order, and with the same reading of an
+ * absent one as requestsMatch: two requests have the same digest exactly when
+ * that function calls them equal. A future field would change every digest at
+ * once, so an old operation replayed across that change is reported as a
+ * conflict rather than silently applied again, which is the safe way round.
+ */
+function requestDigest(request: Partial<PreferenceOperationRequest>): string {
+  return sha256(JSON.stringify({
+    kind: request.kind ?? null,
+    id: request.id ?? null,
+    text: request.text ?? null,
+    date: request.date ?? null,
+    weight: request.weight ?? null,
+    signal: request.signal ?? null,
+    quote: request.quote ?? null,
+    status: request.status ?? null,
+    core: request.core ?? null,
+    domains: Array.isArray(request.domains) ? [...request.domains] : null,
+    why: request.why ?? null,
+    apply: request.apply ?? null,
+    source: request.source ?? null,
+  }));
+}
+
+/** Was this the same call? By digest when there is one, by fields otherwise. */
+function storedRequestMatches(
+  record: PreferenceOperationRecord,
+  requested: PreferenceOperationRequest,
+): boolean {
+  return record.request_sha256 === undefined
+    ? requestsMatch(record.request, requested)
+    : record.request_sha256 === requestDigest(requested);
+}
+
+/** Strips one record down to what still answers the replay question. */
+function compactOperationRecord(record: PreferenceOperationRecord): PreferenceOperationRecord {
+  if (record.compacted === true) {
+    return record;
+  }
+  return {
+    operation_id: record.operation_id,
+    applied_at: record.applied_at,
+    target_id: record.target_id,
+    request: {
+      schema: PREFERENCE_OPERATION_REQUEST_SCHEMA,
+      kind: record.request.kind,
+      id: record.request.id,
+    },
+    request_sha256: record.request_sha256 ?? requestDigest(record.request),
+    compacted: true,
+  };
+}
+
+/**
+ * Appends one operation record and compacts the ones that fell out of the
+ * readable window.
+ *
+ * They used to be dropped, which made idempotency mean "at most once within the
+ * last two hundred operations". Past that, a replayed batch applied a second
+ * time and pushed a weight a human had lowered straight back up, which is the
+ * one thing an identified operation exists to prevent. A compacted record is an
+ * identifier, a date, a target and a digest: enough to recognise the call, and
+ * small enough that remembering every one of them stays cheap.
+ */
 function withOperationRecord(
   ledger: PreferenceLedger,
   record: PreferenceOperationRecord,
 ): PreferenceLedger {
   const operations = [...readPreferenceOperations(ledger), record];
+  const boundary = Math.max(0, operations.length - MAX_OPERATION_HISTORY);
   return {
     ...ledger,
-    operations: operations.slice(Math.max(0, operations.length - MAX_OPERATION_HISTORY)),
+    operations: operations.map(
+      (entry, index) => (index < boundary ? compactOperationRecord(entry) : entry),
+    ),
   };
 }
 
@@ -473,7 +571,7 @@ export function applyPreferenceOperation(
       .find((record) => record.operation_id === input.operationId);
     if (previous) {
       const requested = freezeOperationRequest(input);
-      if (!requestsMatch(previous.request, requested)) {
+      if (!storedRequestMatches(previous, requested)) {
         return {
           kind: "conflict",
           detail: `Operation ${input.operationId} was already applied to ${previous.target_id} with a different payload. Nothing was written. Use a new operation id, or replay the original payload.`,
@@ -502,11 +600,13 @@ export function applyPreferenceOperation(
     return { kind: "applied", ledger: next, preference: clonePreference(preference) };
   }
 
+  const request = freezeOperationRequest(input);
   const recorded = withOperationRecord(next, {
     operation_id: input.operationId,
     applied_at: now.toISOString(),
     target_id: input.id,
-    request: freezeOperationRequest(input),
+    request,
+    request_sha256: requestDigest(request),
   });
   assertValidPreferenceLedger(recorded);
   return { kind: "applied", ledger: recorded, preference: clonePreference(preference) };

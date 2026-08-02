@@ -41,6 +41,16 @@ export const REDLINE_JOURNAL_READ_LIMIT = 200;
 export const REDLINE_TARGETS = ["ledger", "core"] as const;
 export type RedlineTarget = (typeof REDLINE_TARGETS)[number];
 
+/**
+ * Where each target lives, so a target no record covers can still be looked
+ * for. Without this, a kernel file nothing has ever recorded is indistinguishable
+ * from a kernel file that does not exist, and the two mean opposite things.
+ */
+export const REDLINE_TARGET_PATHS: Readonly<Record<RedlineTarget, string>> = {
+  ledger: join("10_memory", "preferences", "_ledger.json"),
+  core: join("10_memory", "preferences", "_core.md"),
+};
+
 /** Where a write came from. Recorded verbatim so a reader can retrace it. */
 export interface RedlineProvenance {
   /** The command that performed the write, for example "prefs log". */
@@ -70,19 +80,46 @@ export interface RedlineEntry {
   operation_id?: string;
 }
 
+/**
+ * Whether a record could be read at all. Absent and unreadable are different
+ * facts about the world, and collapsing them is how "I cannot tell" starts
+ * reading as "there is nothing to tell".
+ */
+export type RedlineRecordStatus = "absent" | "loaded" | "unreadable";
+
 export interface RedlineState {
   schema_version: number;
   updated_at: string;
   targets: Partial<Record<RedlineTarget, RedlineEntry>>;
+  status: RedlineRecordStatus;
 }
 
-export type RedlineVerdict = "match" | "modified" | "missing" | "unrecorded";
+/**
+ * What a check concluded.
+ *
+ * The last one is the one that matters most, and the one that used to be
+ * missing: unverifiable says the file is there and nothing here can vouch for
+ * it. Reporting that as unrecorded, and unrecorded as untampered, turned every
+ * way of losing the record into a clean bill of health, which is the one answer
+ * a tamper detector must never give when it does not know.
+ */
+export type RedlineVerdict =
+  | "match"
+  | "modified"
+  | "missing"
+  | "unrecorded"
+  | "unverifiable";
+
+/** Which half of the record answered. The journal is the evidence. */
+export type RedlineSource = "state" | "journal";
 
 export interface RedlineCheck {
   target: RedlineTarget;
   path: string;
   verdict: RedlineVerdict;
   detail: string;
+  /** Absent when no record covered this target at all. */
+  source?: RedlineSource;
   expected_sha256?: string;
   actual_sha256?: string;
   recorded_at?: string;
@@ -93,6 +130,8 @@ export interface RedlineReport {
   checked_at: string;
   /** True when at least one recorded target no longer matches its record. */
   tampered: boolean;
+  /** True when at least one target exists that nothing here can vouch for. */
+  unverified: boolean;
   checks: RedlineCheck[];
 }
 
@@ -148,34 +187,41 @@ function stateEntries(value: unknown): Partial<Record<RedlineTarget, RedlineEntr
   return targets;
 }
 
+function emptyState(status: RedlineRecordStatus): RedlineState {
+  return { schema_version: REDLINE_SCHEMA_VERSION, updated_at: "", targets: {}, status };
+}
+
 export async function readRedlineState(vaultRoot: string): Promise<RedlineState> {
   let raw: string;
   try {
     raw = await readFile(join(vaultRoot, REDLINE_STATE_RELATIVE_PATH), "utf8");
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
-      return { schema_version: REDLINE_SCHEMA_VERSION, updated_at: "", targets: {} };
+      return emptyState("absent");
     }
-    throw error;
+    // A record that is there and cannot be read is not a record that is not
+    // there. It must still never break a write, so it returns rather than
+    // throws, but it says which of the two it is.
+    return emptyState("unreadable");
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw) as unknown;
   } catch {
-    // An unreadable record is itself a signal, but it must never break a write.
-    // Every target it covered simply becomes unrecorded again.
-    return { schema_version: REDLINE_SCHEMA_VERSION, updated_at: "", targets: {} };
+    return emptyState("unreadable");
+  }
+  if (!isRecord(parsed)) {
+    return emptyState("unreadable");
   }
 
   return {
-    schema_version: isRecord(parsed) && typeof parsed.schema_version === "number"
+    schema_version: typeof parsed.schema_version === "number"
       ? parsed.schema_version
       : REDLINE_SCHEMA_VERSION,
-    updated_at: isRecord(parsed) && typeof parsed.updated_at === "string"
-      ? parsed.updated_at
-      : "",
+    updated_at: typeof parsed.updated_at === "string" ? parsed.updated_at : "",
     targets: stateEntries(parsed),
+    status: "loaded",
   };
 }
 
@@ -226,36 +272,101 @@ export async function writeThroughRedline(
   // rebuilt from the journal, so a crash between the two loses nothing.
   await appendJournalEntry(vaultRoot, entry);
 
+  // A comparison point that could not be read is rebuilt from the journal
+  // rather than replaced by this single entry: writing one target must never be
+  // what makes the other one unverifiable.
   const state = await readRedlineState(vaultRoot);
-  const next: RedlineState = {
+  const base = state.status === "loaded"
+    ? state.targets
+    : await rebuildTargetsFromJournal(vaultRoot);
+  const next = {
     schema_version: REDLINE_SCHEMA_VERSION,
     updated_at: entry.recorded_at,
-    targets: { ...state.targets, [entry.target]: entry },
-  };
+    targets: { ...base, [entry.target]: entry },
+  } satisfies Omit<RedlineState, "status">;
   const statePath = join(vaultRoot, REDLINE_STATE_RELATIVE_PATH);
   await atomicWriteJson(statePath, next);
   await fsyncDirectory(dirname(statePath));
   return entry;
 }
 
+/** The last thing the journal recorded about one target, if it recorded any. */
+function lastJournalEntry(
+  entries: readonly RedlineEntry[],
+  target: RedlineTarget,
+): RedlineEntry | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.target === target) {
+      return entry;
+    }
+  }
+  return undefined;
+}
+
+/** Rebuilds the comparison point from the evidence, target by target. */
+async function rebuildTargetsFromJournal(
+  vaultRoot: string,
+): Promise<Partial<Record<RedlineTarget, RedlineEntry>>> {
+  const journal = await loadJournalEntries(vaultRoot);
+  const targets: Partial<Record<RedlineTarget, RedlineEntry>> = {};
+  for (const target of REDLINE_TARGETS) {
+    const entry = lastJournalEntry(journal.entries, target);
+    if (entry) {
+      targets[target] = entry;
+    }
+  }
+  return targets;
+}
+
+/** Says out loud that the comparison did not come from the usual place. */
+function fallbackNote(status: RedlineRecordStatus): string {
+  return status === "unreadable"
+    ? " The fast comparison record could not be read, so this was checked against the provenance journal, which is the evidence."
+    : " The fast comparison record is gone, so this was checked against the provenance journal, which is the evidence.";
+}
+
 /**
- * Compares every recorded target with the file on disk. A target that was never
- * written through this module is reported as unrecorded rather than as a
- * problem: absence of a record is not evidence of tampering.
+ * Compares every target with what the record says was last written to it.
+ *
+ * The comparison point is the state file, and the evidence is the journal. When
+ * the state file cannot answer, deleted, truncated, emptied to a pair of braces,
+ * the journal answers instead: a detector that a reader can switch off by
+ * removing the file next to the one it protects protects nothing at all.
+ *
+ * When neither can answer, the verdict depends on the file rather than on the
+ * record. A kernel file that exists and that nothing covers is unverifiable, not
+ * clean: that is the state a fresh vault is in until its first recorded write,
+ * and calling it clean would mean vouching for bytes nobody here has ever seen.
  */
 export async function verifyRedline(vaultRoot: string): Promise<RedlineReport> {
   const state = await readRedlineState(vaultRoot);
+  const journal = await loadJournalEntries(vaultRoot);
   const checks: RedlineCheck[] = [];
 
   for (const target of REDLINE_TARGETS) {
-    const entry = state.targets[target];
+    const fromState = state.targets[target];
+    const fromJournal = lastJournalEntry(journal.entries, target);
+    const entry = fromState ?? fromJournal;
+    const source: RedlineSource = fromState ? "state" : "journal";
+    const note = fromState ? "" : fallbackNote(state.status);
+
     if (!entry) {
-      checks.push({
-        target,
-        path: "",
-        verdict: "unrecorded",
-        detail: `No write to the ${target} has been recorded yet, so there is nothing to compare.`,
-      });
+      const path = toPosixPath(REDLINE_TARGET_PATHS[target]);
+      const exists = await pathIsReadable(join(vaultRoot, REDLINE_TARGET_PATHS[target]));
+      checks.push(exists
+        ? {
+          target,
+          path,
+          verdict: "unverifiable",
+          detail: `${path} exists and no write to it has ever been recorded here, so nothing in this report can say whether its content was ever reviewed. That is an absence of evidence, not a clean result. The next write through \`open-brain prefs\` or the sync gate records it, and every later check compares against that.`,
+        }
+        : {
+          target,
+          path,
+          verdict: "unrecorded",
+          detail: `No write to the ${target} has been recorded, and there is no file at ${path} either, so there is nothing to compare.`,
+        });
       continue;
     }
 
@@ -267,7 +378,8 @@ export async function verifyRedline(vaultRoot: string): Promise<RedlineReport> {
         target,
         path: entry.path,
         verdict: "missing",
-        detail: `${entry.path} was recorded on ${entry.recorded_at} by ${entry.command} but cannot be read now. Its removal is detected, not prevented.`,
+        detail: `${entry.path} was recorded on ${entry.recorded_at} by ${entry.command} but cannot be read now. Its removal is detected, not prevented.${note}`,
+        source,
         expected_sha256: entry.sha256,
         recorded_at: entry.recorded_at,
         command: entry.command,
@@ -281,7 +393,8 @@ export async function verifyRedline(vaultRoot: string): Promise<RedlineReport> {
         target,
         path: entry.path,
         verdict: "match",
-        detail: `${entry.path} matches the write recorded on ${entry.recorded_at} by ${entry.command}.`,
+        detail: `${entry.path} matches the write recorded on ${entry.recorded_at} by ${entry.command}.${note}`,
+        source,
         expected_sha256: entry.sha256,
         actual_sha256: actual,
         recorded_at: entry.recorded_at,
@@ -294,7 +407,8 @@ export async function verifyRedline(vaultRoot: string): Promise<RedlineReport> {
       target,
       path: entry.path,
       verdict: "modified",
-      detail: `${entry.path} changed outside the recorded write paths. Last recorded write: ${entry.command} on ${entry.recorded_at}. The change is detected, not prevented; review it, then re-run the command that owns this file.`,
+      detail: `${entry.path} changed outside the recorded write paths. Last recorded write: ${entry.command} on ${entry.recorded_at}. The change is detected, not prevented; review it, then re-run the command that owns this file.${note}`,
+      source,
       expected_sha256: entry.sha256,
       actual_sha256: actual,
       recorded_at: entry.recorded_at,
@@ -305,8 +419,61 @@ export async function verifyRedline(vaultRoot: string): Promise<RedlineReport> {
   return {
     checked_at: new Date().toISOString(),
     tampered: checks.some((check) => check.verdict === "modified" || check.verdict === "missing"),
+    unverified: checks.some((check) => check.verdict === "unverifiable"),
     checks,
   };
+}
+
+function parseJournalLines(raw: string): { entries: RedlineEntry[]; unreadable: number } {
+  const entries: RedlineEntry[] = [];
+  let unreadable = 0;
+  for (const line of raw.split("\n")) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      unreadable += 1;
+      continue;
+    }
+    if (isRedlineEntry(parsed)) {
+      entries.push(parsed);
+    } else {
+      unreadable += 1;
+    }
+  }
+  return { entries, unreadable };
+}
+
+/**
+ * Reads the journal for a verification, which must never fail because of the
+ * journal itself: a check that throws when the evidence is unreadable reports
+ * nothing at all about the file it was asked about.
+ */
+async function loadJournalEntries(vaultRoot: string): Promise<{
+  entries: RedlineEntry[];
+  status: RedlineRecordStatus;
+}> {
+  let raw: string;
+  try {
+    raw = await readFile(join(vaultRoot, REDLINE_JOURNAL_RELATIVE_PATH), "utf8");
+  } catch (error) {
+    return { entries: [], status: hasErrorCode(error, "ENOENT") ? "absent" : "unreadable" };
+  }
+  return { entries: parseJournalLines(raw).entries, status: "loaded" };
+}
+
+async function pathIsReadable(path: string): Promise<boolean> {
+  try {
+    await readFile(path);
+    return true;
+  } catch (error) {
+    // A path that exists and cannot be read is still a path that exists, and
+    // saying otherwise would turn a locked file into an absent one.
+    return !hasErrorCode(error, "ENOENT");
+  }
 }
 
 /**
@@ -329,26 +496,7 @@ export async function readRedlineJournal(
     throw error;
   }
 
-  const entries: RedlineEntry[] = [];
-  let unreadable = 0;
-  for (const line of raw.split("\n")) {
-    if (line.trim().length === 0) {
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line) as unknown;
-    } catch {
-      unreadable += 1;
-      continue;
-    }
-    if (isRedlineEntry(parsed)) {
-      entries.push(parsed);
-    } else {
-      unreadable += 1;
-    }
-  }
-
+  const { entries, unreadable } = parseJournalLines(raw);
   const kept = limit >= 0 && entries.length > limit ? entries.slice(entries.length - limit) : entries;
   return {
     entries: kept,

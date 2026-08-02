@@ -47,7 +47,11 @@
         "content_hash": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
-          "description": "sha256 of the canonical JSON of this object without batch_id and content_hash. Re-checked on every load."
+          "description": "sha256 of the canonical JSON of this object without batch_id, content_hash and prepared_at. Re-checked on every load."
+        },
+        "prepared_at": {
+          "type": ["string", "null"],
+          "description": "When the batch was built. Outside the signature, so it never changes the identity of a batch, and absent on a batch written before the stamp existed. sync pending and sync show turn it into an age and a staleness verdict."
         }
       }
     },

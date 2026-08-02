@@ -40,7 +40,13 @@ import {
   OPENBRAIN_LOADER_END_MARKER,
   syncLoadersFromConfig,
 } from "../loaders/index.js";
-import { verifyRedline, type RedlineReport } from "../prefs/index.js";
+import {
+  PREFERENCE_CORE_RELATIVE_PATH,
+  PREFERENCE_LEDGER_RELATIVE_PATH,
+  verifyRedline,
+  writeThroughRedline,
+  type RedlineReport,
+} from "../prefs/index.js";
 import { protectedRelativePaths } from "../staging/guard.js";
 
 export const ENGINE_VERSION = "0.1.0-alpha.2";
@@ -272,6 +278,14 @@ async function ensureInitialState(root: string): Promise<void> {
     [
       "---",
       "lifecycle: master",
+      // Per-line budgets, in characters, checked by the stop hook. A day entry
+      // gets room while it is fresh and tightens as it ages; a workstream line
+      // stays a pointer to the file that holds its detail.
+      "line_budget_day: 1200",
+      "line_budget_d1_d3: 700",
+      "line_budget_d4_d7: 250",
+      "line_budget_project: 450",
+      "line_budget_closed: 150",
       "---",
       "# Living state",
       "",
@@ -396,6 +410,33 @@ export async function resolveVaultRoot(start?: string): Promise<string> {
   return root;
 }
 
+/**
+ * Records the kernel the templates just seeded, byte for byte, without changing
+ * it. Init writes a ledger and a core that no write path ever saw, so until this
+ * runs the redline can say nothing at all about them, and a report that cannot
+ * tell reads exactly like a report that verified. The seed is the first
+ * recorded write, and every later check compares against it.
+ */
+async function recordSeededKernel(root: string): Promise<void> {
+  const seeded = [
+    { target: "ledger", relativePath: PREFERENCE_LEDGER_RELATIVE_PATH },
+    { target: "core", relativePath: PREFERENCE_CORE_RELATIVE_PATH },
+  ] as const;
+  for (const { target, relativePath } of seeded) {
+    const content = await readFile(join(root, relativePath), "utf8").catch(() => undefined);
+    if (content === undefined) {
+      continue;
+    }
+    await writeThroughRedline(root, {
+      target,
+      relativePath,
+      content,
+      command: "init",
+      validation: "vault-template",
+    });
+  }
+}
+
 export async function initVault(
   target: string,
   options: InitVaultOptions = {},
@@ -432,6 +473,7 @@ export async function initVault(
   await writeManifest(root);
   await ensureFreeModeState(root, readFreeMode(config));
   await syncLoadersFromConfig(root, config);
+  await recordSeededKernel(root);
 
   const git = options.noGit ? "skipped" : await initializeGit(root);
   return { root, copiedTemplateFiles, git };

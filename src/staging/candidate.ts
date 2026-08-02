@@ -948,8 +948,22 @@ export function computeItemOperationId(index: number, item: unknown): string {
   return `sync-${digest({ index, item }).slice(0, 32)}`;
 }
 
+/**
+ * The signature of a batch, over everything that is a clause of the contract.
+ *
+ * prepared_at is excluded exactly like batch_id and content_hash: it is
+ * freshness metadata, not a term a human decides on. Leaving it out keeps the
+ * digest, and therefore the identifier, identical to what it would have been
+ * without the field, so a batch written before the stamp existed still verifies
+ * without a migration.
+ */
 export function computeContentHash(batch: Record<string, unknown>): string {
-  const { batch_id: _batchId, content_hash: _contentHash, ...rest } = batch;
+  const {
+    batch_id: _batchId,
+    content_hash: _contentHash,
+    prepared_at: _preparedAt,
+    ...rest
+  } = batch;
   return digest(rest);
 }
 

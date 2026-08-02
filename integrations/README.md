@@ -63,7 +63,7 @@ sends one, so a host that renames an event still gets an envelope it recognises.
 | `user-prompt-submit` | you submit a prompt | injects the routing decision, the first files to read, and the preferences of that domain |
 | `pre-tool-use` | before a tool runs | delegates to the guard, which either allows in silence or refuses the call outright |
 | `post-tool-use` | after a write or an edit | reports a new Markdown file landing outside the canonical layers, or with no lifecycle front matter |
-| `stop` | the assistant finishes a turn | reminds you to update the living state when vault content changed and it did not, and enforces the living state's own load cap |
+| `stop` | the assistant finishes a turn | reminds you to update the living state when vault content changed and it did not, and enforces the living state's own load cap and per-line budgets |
 | `pre-compact` | before the session is compacted | extension point for the staging layer; silent until something registers there |
 
 ## The living state has a ceiling, and it sets it itself
@@ -85,6 +85,36 @@ characters moved stays behind in the living state. The archive is published
 before the living state is trimmed, so the worst a crash between the two writes
 can do is leave the same text in both files. With no `max_load` declared,
 nothing happens at all: the engine never picks a ceiling for you.
+
+## The living state also budgets its lines
+
+The ceiling on the whole file cannot do this job on its own. Consolidation
+evicts whole sections, so one line that swallows an entire day can sit at eighty
+percent of the ceiling and leave the document unable to converge, however
+diligent the assistant is. The stop hook therefore checks a budget per line,
+declared in the same front matter and defaulted when it is not:
+
+```markdown
+---
+lifecycle: master
+line_budget_day: 1200
+line_budget_d1_d3: 700
+line_budget_d4_d7: 250
+line_budget_project: 450
+line_budget_closed: 150
+---
+```
+
+A dated line under `## Current session` or `## Current work` is measured against
+the tier of its age: the day it is written, then one to three days old, then
+older. A bullet under `## Active workstreams` is measured against the workstream
+budget, and one under a `## Closed ...` heading against the closed budget. Lines
+the engine generated itself are skipped, and so is any section with no budget.
+
+Over budget, the turn ends with a soft block naming each line, its size, its
+budget and what to cut: keep the decisions, the red lines, the dated bars and
+the file paths, and drop anything already written in a file the line cites.
+Nothing is rewritten for you. A file inside its budgets is silent.
 
 ## Five rules every hook obeys
 

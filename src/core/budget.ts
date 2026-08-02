@@ -60,7 +60,12 @@ function budgetFor(
   };
 }
 
-function truncationNotice(shown: number, total: number, maxChars: number): string {
+/**
+ * The one wording for "something was dropped here". Exported so an organ that
+ * caps text its own way still announces the drop in the same words, instead of
+ * inventing a second dialect for the same event.
+ */
+export function truncationNotice(shown: number, total: number, maxChars: number): string {
   return `[open-brain] TRUNCATED: showing ${String(shown)} of ${String(total)} item(s), capped at ${String(maxChars)} characters. Open the source to read the rest.`;
 }
 
