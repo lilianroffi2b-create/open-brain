@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from "node:path";
 
 import { atomicWriteText } from "../core/fs-atomic.js";
 import { lockPathFor, withLock } from "../core/lock.js";
+import { loadVaultSecret, sealsMatch, vaultMac, type VaultSecret } from "../core/secret.js";
 import { sha256, toPosixPath } from "../core/text.js";
 import type { VaultConfig } from "../core/types.js";
 import {
@@ -415,7 +416,7 @@ function parseBatchItem(value: unknown, index: number): BatchItem {
  * identifier derived from it, so an edited item, an added item, or a renamed
  * file are all caught before a single precondition is evaluated.
  */
-export function parseBatch(value: unknown, origin: string): StagingBatch {
+export function parseBatch(value: unknown, origin: string, secret: VaultSecret): StagingBatch {
   if (!isRecord(value)) {
     throw new SyncGateError(`${origin} is not a JSON object.`);
   }
@@ -424,10 +425,10 @@ export function parseBatch(value: unknown, origin: string): StagingBatch {
   }
   const contentHash = requiredString(value.content_hash, "content_hash", origin);
   const batchId = requiredString(value.batch_id, "batch_id", origin);
-  const recomputed = computeContentHash(value);
-  if (recomputed !== contentHash) {
+  const recomputed = computeContentHash(value, secret);
+  if (!sealsMatch(contentHash, recomputed)) {
     throw new SyncGateError(
-      `${origin} does not match its own content hash. The batch was modified after it was written, so it is refused. Nothing was applied.`,
+      `${origin} does not match its own content hash. Either the batch was modified after it was written, or it was written somewhere this vault key cannot vouch for. Either way it is refused and nothing was applied.`,
     );
   }
   if (computeBatchId(contentHash) !== batchId) {
@@ -481,7 +482,11 @@ function parseOperationState(value: unknown, origin: string): BatchOperationStat
   };
 }
 
-export function parseBatchState(value: unknown, origin: string): BatchState {
+export function parseBatchState(
+  value: unknown,
+  origin: string,
+  secret: VaultSecret,
+): BatchState {
   if (!isRecord(value)) {
     throw new SyncGateError(`${origin} is not a JSON object.`);
   }
@@ -489,9 +494,9 @@ export function parseBatchState(value: unknown, origin: string): BatchState {
     throw new SyncGateError(`${origin} is not a ${BATCH_STATE_SCHEMA} document.`);
   }
   const stateHash = requiredString(value.state_hash, "state_hash", origin);
-  if (computeStateHash(value) !== stateHash) {
+  if (!sealsMatch(stateHash, computeStateHash(value, secret))) {
     throw new SyncGateError(
-      `${origin} does not match its own state hash. The apply state was modified outside the gate, so it is refused. Nothing was applied.`,
+      `${origin} does not match its own state hash. The apply state was written outside this gate, so it is refused. Nothing was applied.`,
     );
   }
   const phase = value.phase;
@@ -524,11 +529,13 @@ export function parseBatchState(value: unknown, origin: string): BatchState {
       rejected_indices: rejected.filter((item): item is number => typeof item === "number"),
       hash: requiredString(value.decision.hash, "decision.hash", origin),
     };
-    if (
-      computeDecisionHash(decision.approved_indices, decision.rejected_indices) !== decision.hash
-    ) {
+    const batchId = requiredString(value.batch_id, "batch_id", origin);
+    if (!sealsMatch(
+      decision.hash,
+      computeDecisionHash(decision.approved_indices, decision.rejected_indices, secret, batchId),
+    )) {
       throw new SyncGateError(
-        `${origin}.decision does not match its own hash. The recorded human decision was modified, so it is refused.`,
+        `${origin}.decision does not match its own hash. The recorded human decision was written outside this gate, so it is refused.`,
       );
     }
   }
@@ -548,7 +555,23 @@ export function parseBatchState(value: unknown, origin: string): BatchState {
   };
 }
 
-export function parseBatchDecision(value: unknown, origin: string): BatchDecisionFile {
+/**
+ * Reads the frozen decision, and proves it came from a run of this gate.
+ *
+ * This is the single most load bearing check in the whole module, because
+ * apply.ts stops asking for a human the moment a decision exists: a decision is
+ * frozen once, and replaying it is bookkeeping rather than a new choice. That
+ * shortcut is only sound if the presence of the file really does imply a prior
+ * authenticated run, which is exactly what the keyed hash now establishes and
+ * what a plain sha256 never did. With an unkeyed hash, writing a decision file
+ * that approved everything, seal included, took four lines of node and turned
+ * the human gate off completely.
+ */
+export function parseBatchDecision(
+  value: unknown,
+  origin: string,
+  secret: VaultSecret,
+): BatchDecisionFile {
   if (!isRecord(value)) {
     throw new SyncGateError(`${origin} is not a JSON object.`);
   }
@@ -566,9 +589,10 @@ export function parseBatchDecision(value: unknown, origin: string): BatchDecisio
   const approvedIndices = approved.filter((item): item is number => typeof item === "number");
   const rejectedIndices = rejected.filter((item): item is number => typeof item === "number");
   const hash = requiredString(value.decision.hash, "decision.hash", origin);
-  if (computeDecisionHash(approvedIndices, rejectedIndices) !== hash) {
+  const batchId = requiredString(value.batch_id, "batch_id", origin);
+  if (!sealsMatch(hash, computeDecisionHash(approvedIndices, rejectedIndices, secret, batchId))) {
     throw new SyncGateError(
-      `${origin} does not match its own decision hash. The frozen human decision was modified, so it is refused.`,
+      `${origin} does not match its own decision hash. A frozen decision is sealed with the key of this vault, which lives outside it, so a file that does not carry that seal was not written by any run of this gate. It is refused, and nothing was applied. Delete it and decide the batch again with \`open-brain sync validate\` if you wrote it yourself.`,
     );
   }
   return {
@@ -576,7 +600,7 @@ export function parseBatchDecision(value: unknown, origin: string): BatchDecisio
     schema_version: typeof value.schema_version === "number"
       ? value.schema_version
       : STAGING_SCHEMA_VERSION,
-    batch_id: requiredString(value.batch_id, "batch_id", origin),
+    batch_id: batchId,
     decision: {
       approved_indices: approvedIndices,
       rejected_indices: rejectedIndices,
@@ -597,7 +621,7 @@ export async function loadBatch(
       `Unknown batch ${batchId}. List what is active with \`open-brain sync pending\`.`,
     );
   }
-  return parseBatch(value, `${batchId}.json`);
+  return parseBatch(value, `${batchId}.json`, await loadVaultSecret(root));
 }
 
 export async function loadBatchState(
@@ -607,7 +631,9 @@ export async function loadBatchState(
 ): Promise<BatchState | undefined> {
   const paths = batchPaths(root, config, batchId);
   const value = await readJsonFile(paths.state, `${batchId}.state.json`);
-  return value === undefined ? undefined : parseBatchState(value, `${batchId}.state.json`);
+  return value === undefined
+    ? undefined
+    : parseBatchState(value, `${batchId}.state.json`, await loadVaultSecret(root));
 }
 
 export async function loadBatchDecision(
@@ -617,10 +643,25 @@ export async function loadBatchDecision(
 ): Promise<BatchDecisionFile | undefined> {
   const paths = batchPaths(root, config, batchId);
   const value = await readJsonFile(paths.decision, `${batchId}.decision.json`);
-  return value === undefined ? undefined : parseBatchDecision(value, `${batchId}.decision.json`);
+  return value === undefined
+    ? undefined
+    : parseBatchDecision(value, `${batchId}.decision.json`, await loadVaultSecret(root));
 }
 
-function parsePresentation(value: unknown, origin: string): PresentationRecord {
+/** The seal of a presentation, so the token cannot simply be chosen. */
+const PRESENTATION_DOMAIN = "open-brain/batch-presentation/v1";
+
+function presentationSeal(record: Omit<PresentationRecord, "seal">, secret: VaultSecret): string {
+  return vaultMac(
+    secret,
+    PRESENTATION_DOMAIN,
+    JSON.stringify([record.batch_id, record.presented_at, record.token]),
+  );
+}
+
+function parsePresentation(value: unknown, origin: string): Omit<PresentationRecord, "seal"> & {
+  seal: string | undefined;
+} {
   if (!isRecord(value) || value.schema !== SYNC_PRESENTATION_SCHEMA) {
     throw new SyncGateError(`${origin} is not a ${SYNC_PRESENTATION_SCHEMA} document.`);
   }
@@ -632,10 +673,21 @@ function parsePresentation(value: unknown, origin: string): PresentationRecord {
     batch_id: requiredString(value.batch_id, "batch_id", origin),
     presented_at: requiredString(value.presented_at, "presented_at", origin),
     token: requiredString(value.token, "token", origin),
+    seal: typeof value.seal === "string" ? value.seal : undefined,
   };
 }
 
-/** The proof that this batch was put in front of somebody, if it ever was. */
+/**
+ * The proof that this batch was put in front of somebody, if it ever was.
+ *
+ * The token is half of what proves a human decided: `sync show` prints it and
+ * nowhere else does, so retyping it says the batch was read rather than named.
+ * A record whose seal does not verify is therefore treated as no record at all,
+ * not as a record with a bad seal: an unsealed file is a token somebody chose
+ * for themselves, and answering a question with an answer you wrote yourself
+ * proves nothing. Reporting it as absent also lets the next `sync show` write a
+ * real one over it, so a vault is never wedged by a file it can rewrite.
+ */
 export async function loadPresentation(
   root: string,
   config: VaultConfig,
@@ -643,7 +695,15 @@ export async function loadPresentation(
 ): Promise<PresentationRecord | undefined> {
   const paths = batchPaths(root, config, batchId);
   const value = await readJsonFile(paths.presentation, `${batchId}.presented.json`);
-  return value === undefined ? undefined : parsePresentation(value, `${batchId}.presented.json`);
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = parsePresentation(value, `${batchId}.presented.json`);
+  const secret = await loadVaultSecret(root);
+  if (!sealsMatch(parsed.seal, presentationSeal(parsed, secret))) {
+    return undefined;
+  }
+  return { ...parsed, seal: parsed.seal ?? "" };
 }
 
 /**
@@ -665,18 +725,22 @@ async function recordPresentation(
     return existing;
   }
   const paths = batchPaths(root, config, batchId);
-  const record: PresentationRecord = {
+  const draft = {
     schema: SYNC_PRESENTATION_SCHEMA,
     schema_version: SYNC_SCHEMA_VERSION,
     batch_id: batchId,
     presented_at: nowTimestamp(),
     token: newConfirmationToken(),
+  } as const;
+  const record: PresentationRecord = {
+    ...draft,
+    seal: presentationSeal(draft, await loadVaultSecret(root)),
   };
   await atomicWriteText(paths.presentation, `${JSON.stringify(record, null, 2)}\n`);
   return await loadPresentation(root, config, batchId) ?? record;
 }
 
-export function sealState(state: BatchState): BatchState {
+export function sealState(state: BatchState, secret: VaultSecret): BatchState {
   const withoutHash = {
     schema: state.schema,
     schema_version: state.schema_version,
@@ -687,7 +751,7 @@ export function sealState(state: BatchState): BatchState {
     scan_done: state.scan_done,
     compacted: state.compacted,
   };
-  return { ...withoutHash, state_hash: computeStateHash(withoutHash) };
+  return { ...withoutHash, state_hash: computeStateHash(withoutHash, secret) };
 }
 
 export async function saveBatchState(
@@ -695,18 +759,23 @@ export async function saveBatchState(
   config: VaultConfig,
   state: BatchState,
 ): Promise<BatchState> {
-  const sealed = sealState(state);
+  const sealed = sealState(state, await loadVaultSecret(root));
   const paths = batchPaths(root, config, sealed.batch_id);
   await atomicWriteText(paths.state, `${JSON.stringify(sealed, null, 2)}\n`);
   return sealed;
 }
 
+/**
+ * The state a batch starts in. It is left unsealed on purpose: every caller
+ * hands it straight to saveBatchState, which is the one place that holds the
+ * vault key, and a second sealing point is a second place to forget to seal.
+ */
 export function initialBatchState(batch: StagingBatch): BatchState {
   const operations: Record<string, BatchOperationState> = {};
   for (const item of batch.items) {
     operations[item.operation_id] = { status: "pending", attempts: 0, ref: null, error: null };
   }
-  return sealState({
+  return {
     schema: BATCH_STATE_SCHEMA,
     schema_version: STAGING_SCHEMA_VERSION,
     batch_id: batch.batch_id,
@@ -716,7 +785,7 @@ export function initialBatchState(batch: StagingBatch): BatchState {
     scan_done: false,
     compacted: false,
     state_hash: "",
-  });
+  };
 }
 
 /**
@@ -1082,17 +1151,13 @@ function buildWeightWrite(
 }
 
 /**
- * Resolves a memory target the hard way. A note lands directly under the notes
- * directory, with no traversal, no symlink anywhere on the path, and no
- * existing entry that is not a regular file. Every one of those checks exists
- * because the alternative is a classified string deciding which file on the
- * machine gets overwritten.
+ * The half of the memory target rule that needs no disk: shape, location and
+ * name. It is separate so the undo record can hold a snapshot path to exactly
+ * the same standard as a batch item does, without duplicating the rule in a
+ * second file where the two copies would drift apart. A path that reaches
+ * join(root, path) and then a write must have been through this first.
  */
-export async function resolveMemoryTarget(
-  root: string,
-  config: VaultConfig,
-  target: string,
-): Promise<{ relativePath: string; absolutePath: string }> {
+export function assertMemoryTargetShape(config: VaultConfig, target: string): string {
   const relative = toPosixPath(target);
   if (isAbsolute(target) || relative.includes("\\")) {
     throw new SyncGateError(
@@ -1128,7 +1193,22 @@ export async function resolveMemoryTarget(
       `Memory note ${name} must start with one of ${MEMORY_NAME_PREFIXES.join(", ")} so its kind is readable before it is opened.`,
     );
   }
+  return relative;
+}
 
+/**
+ * Resolves a memory target the hard way. A note lands directly under the notes
+ * directory, with no traversal, no symlink anywhere on the path, and no
+ * existing entry that is not a regular file. Every one of those checks exists
+ * because the alternative is a classified string deciding which file on the
+ * machine gets overwritten.
+ */
+export async function resolveMemoryTarget(
+  root: string,
+  config: VaultConfig,
+  target: string,
+): Promise<{ relativePath: string; absolutePath: string }> {
+  const relative = assertMemoryTargetShape(config, target);
   const absolutePath = join(root, relative);
   let current = resolve(root);
   for (const segment of relative.split("/")) {
@@ -1301,7 +1381,7 @@ export async function buildBatch(
     selection_id: input.selectionId,
     items: items.map((item) => ({ ...item, write: toRecord(item.write, "write payload") })),
   };
-  const contentHash = computeContentHash(draft);
+  const contentHash = computeContentHash(draft, await loadVaultSecret(root));
   return {
     schema: BATCH_SCHEMA,
     schema_version: STAGING_SCHEMA_VERSION,

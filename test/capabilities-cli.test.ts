@@ -226,7 +226,7 @@ test("disable takes the children with it and is effective immediately", async (t
     CONSOLIDATE_CONFIRMATION_PHRASE,
   ]);
 
-  const disabled = await runJson(["disable", "learning", "--root", root]);
+  const disabled = await runJson(["disable", "learning", "--root", root, "--unattended"]);
   assert.equal(disabled.applied, true);
   assert.deepEqual(disabled.children_disarmed, ["learning.evaluate", "learning.consolidate"]);
   assert.deepEqual(
@@ -242,7 +242,7 @@ test("disable takes the children with it and is effective immediately", async (t
   assert.deepEqual(listing.armed, []);
   assert.deepEqual(listing.issues, []);
 
-  const noop = await runJson(["disable", "learning", "--root", root]);
+  const noop = await runJson(["disable", "learning", "--root", root, "--unattended"]);
   assert.equal(noop.applied, false);
   assert.equal(noop.already_disarmed, true);
 });

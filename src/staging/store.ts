@@ -605,8 +605,26 @@ export async function stagingStatus(
   };
 }
 
+/** The only shape an archive month may take: it becomes part of a file name. */
+const ARCHIVE_MONTH_PATTERN = /^\d{4}-\d{2}$/u;
+
+/**
+ * The month a candidate archives into, taken from its own timestamp and fed
+ * straight into `join()` as a file name. Nothing upstream guarantees that
+ * timestamp is a clean `YYYY-MM-DDTHH:mm:ss` string: a malformed or crafted
+ * one, `../../../etc/passwd` sliced to seven characters is still attacker
+ * shaped, would otherwise become a path segment. Refusing anything that is
+ * not exactly four digits, a dash, two digits closes that door before the
+ * value ever reaches a path.
+ */
 function archiveMonth(row: CandidateRow): string {
-  return (row.resolved_ts ?? row.ts).slice(0, 7);
+  const month = (row.resolved_ts ?? row.ts).slice(0, 7);
+  if (!ARCHIVE_MONTH_PATTERN.test(month)) {
+    throw new CorruptStoreError(
+      `Candidate ${row.id} has a timestamp that does not produce a valid archive month ("${month}"). Refusing to derive an archive path from it.`,
+    );
+  }
+  return month;
 }
 
 export interface CompactResult {

@@ -1,6 +1,12 @@
 import { isAbsolute, join, resolve } from "node:path";
 
+import { VAULT_CONFIG_RELATIVE_PATH } from "../core/config.js";
 import type { VaultConfig } from "../core/types.js";
+import {
+  REDLINE_JOURNAL_RELATIVE_PATH,
+  REDLINE_STATE_RELATIVE_PATH,
+  REDLINE_TARGET_PATHS,
+} from "../prefs/redline.js";
 
 /**
  * The pre-effect guard on the preference kernel.
@@ -52,6 +58,40 @@ const BLOCK_MESSAGE =
 const MAX_DEPTH = 4;
 const PREFERENCES_DIRECTORY = "preferences";
 const PROTECTED_FILENAMES: readonly string[] = ["_ledger.json", "_core.md"];
+
+/**
+ * Files this guard protects no matter what `config.paths.memory` says.
+ *
+ * `protectedPathsFor` used to derive the whole perimeter from the configured
+ * memory root, and `00_index/vault.config.yml` is exactly what sets that
+ * root: a caller free to edit the config was a caller free to walk the real
+ * kernel, `10_memory/preferences/_ledger.json` and `_core.md`, out from under
+ * `guarded.directory` before writing to it. `REDLINE_TARGET_PATHS` is that
+ * real kernel, imported rather than re-derived so there is exactly one
+ * definition of it in the codebase. The redline record itself is added for
+ * the same reason: a write there is what would let a tamperer edit the
+ * kernel and then erase the evidence that anything changed. None of this
+ * depends on `config.paths.memory`, on purpose: it is the fixed floor under
+ * a configurable directory, not a mirror of it.
+ */
+const HARDCODED_PROTECTED_FILES: readonly string[] = [
+  ...Object.values(REDLINE_TARGET_PATHS),
+  REDLINE_STATE_RELATIVE_PATH,
+  REDLINE_JOURNAL_RELATIVE_PATH,
+  VAULT_CONFIG_RELATIVE_PATH,
+];
+
+/**
+ * Directories this guard protects no matter what `config.paths.memory` says.
+ *
+ * Staged batches are candidates the sync gate has not ruled on yet: writing
+ * into them directly is a way to plant or alter what `sync validate` will
+ * later treat as reviewed. The path is written out literally, not built from
+ * `config.paths.memory`, for the same reason as the files above.
+ */
+const HARDCODED_PROTECTED_DIRECTORIES: readonly string[] = [
+  join("10_memory", "staging", "batches"),
+];
 
 /**
  * `notebookedit` is on both lists because `filePathOf` already read
@@ -137,7 +177,7 @@ const KEYWORDS: readonly string[] = [
 /** Wrappers that take a positional argument of their own before the command. */
 const WRAPPER_POSITIONAL_ARGS: Readonly<Record<string, number>> = { timeout: 1 };
 
-const SHELLS: readonly string[] = ["sh", "bash", "zsh", "dash", "ksh", "ash"];
+const SHELLS: readonly string[] = ["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
 
 const INTERPRETERS: readonly string[] = [
   "python",
@@ -254,6 +294,21 @@ const WRITE_MARKERS =
  */
 const OPAQUE_MARKERS =
   /base64|b64decode|b64encode|atob\s*\(|btoa\s*\(|fromhex|unhexlify|fromCharCode|\.decode\s*\(\s*["']hex|codecs\.decode|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|chr\s*\(/u;
+
+/**
+ * Interpreter primitives that hand a whole line to a shell, the same act as
+ * awk's `system()`. None of them appear in WRITE_MARKERS, whose vocabulary is
+ * language-level file operations, so a body that only shells out through one
+ * of these was invisible to `analyzeCode` even though a shell command is
+ * exactly the write vector the rest of this file exists to read.
+ *
+ * The match is on the qualified name, `child_process.execSync(`, the same
+ * literal shape `analyzeAwk` matches for `system(`. It is named rather than
+ * hidden that `require('child_process').execSync(` does not match this: that
+ * is the gap this table leaves, same as every other table in this file.
+ */
+const SHELL_EXEC_MARKERS =
+  /\bos\.system\s*\(|\bos\.popen\s*\(|\bsubprocess\.run\s*\(|\bsubprocess\.call\s*\(|\bsubprocess\.Popen\s*\(|child_process\.execSync\s*\(|child_process\.exec\s*\(/gu;
 
 const NULL_BYTE = "\u0000";
 const VAR_OPEN = "\uE000";
@@ -753,18 +808,36 @@ function splitSegments(tokens: readonly Token[]): Segment[] {
 // ---------------------------------------------------------------------------
 
 interface ProtectedPaths {
-  directory: string;
+  /** Every directory a target inside counts as protected, configured plus hardcoded. */
+  directories: string[];
   files: string[];
 }
 
+/**
+ * The perimeter this guard enforces: the configured preferences directory
+ * (`config.paths.memory`, editable, and legitimately so, since a vault is
+ * free to rename its own memory root) UNIONED with the paths nothing in the
+ * config can move, see `HARDCODED_PROTECTED_FILES` and
+ * `HARDCODED_PROTECTED_DIRECTORIES` above. Changing `memory:` in
+ * `vault.config.yml` can widen or narrow the first set; it can never touch
+ * the second.
+ */
 function protectedPathsFor(input: GuardInput): ProtectedPaths {
   const memory = typeof input.config.paths.memory === "string" && input.config.paths.memory.length > 0
     ? input.config.paths.memory
     : "10_memory";
-  const directory = resolve(join(input.vaultRoot, memory, PREFERENCES_DIRECTORY));
+  const configuredDirectory = resolve(join(input.vaultRoot, memory, PREFERENCES_DIRECTORY));
+  const directories = [
+    configuredDirectory,
+    ...HARDCODED_PROTECTED_DIRECTORIES.map((relative) => resolve(join(input.vaultRoot, relative))),
+  ];
+  const files = [
+    ...PROTECTED_FILENAMES.map((name) => join(configuredDirectory, name)),
+    ...HARDCODED_PROTECTED_FILES.map((relative) => resolve(join(input.vaultRoot, relative))),
+  ];
   return {
-    directory: comparable(directory),
-    files: PROTECTED_FILENAMES.map((name) => comparable(join(directory, name))),
+    directories: directories.map((directory) => comparable(directory)),
+    files: files.map((file) => comparable(file)),
   };
 }
 
@@ -831,13 +904,25 @@ function expandWord(value: string, variables: ReadonlyMap<string, string>): stri
   return undefined;
 }
 
+/** Basenames of the hardcoded protected files, for the unresolved `~` heuristic below. */
+const HARDCODED_PROTECTED_BASENAMES: readonly string[] =
+  HARDCODED_PROTECTED_FILES.map((path) => basename(path));
+
+/** `/segment/` forms of the hardcoded protected directories, same purpose. */
+const HARDCODED_PROTECTED_DIRECTORY_SEGMENTS: readonly string[] =
+  HARDCODED_PROTECTED_DIRECTORIES.map((directory) => `/${directory.replace(/\\/gu, "/")}/`);
+
 function classifyTarget(target: WriteTarget, guarded: ProtectedPaths): TargetVerdict {
   const raw = target.raw;
   if (raw.length === 0) {
     return "outside";
   }
   if (raw.startsWith("~")) {
-    return PROTECTED_FILENAMES.includes(basename(raw)) || raw.includes(`/${PREFERENCES_DIRECTORY}/`)
+    const name = basename(raw);
+    return PROTECTED_FILENAMES.includes(name)
+      || HARDCODED_PROTECTED_BASENAMES.includes(name)
+      || raw.includes(`/${PREFERENCES_DIRECTORY}/`)
+      || HARDCODED_PROTECTED_DIRECTORY_SEGMENTS.some((segment) => raw.includes(segment))
       ? "protected"
       : "unresolved";
   }
@@ -846,10 +931,12 @@ function classifyTarget(target: WriteTarget, guarded: ProtectedPaths): TargetVer
   if (guarded.files.includes(normalized)) {
     return "protected";
   }
-  if (normalized === guarded.directory || normalized.startsWith(`${guarded.directory}/`)) {
-    return "protected";
+  for (const directory of guarded.directories) {
+    if (normalized === directory || normalized.startsWith(`${directory}/`)) {
+      return "protected";
+    }
   }
-  if (guarded.directory.startsWith(`${normalized}/`)) {
+  if (guarded.directories.some((directory) => directory.startsWith(`${normalized}/`))) {
     return "ancestor";
   }
   return "outside";
@@ -912,6 +999,12 @@ const MUTATORS: Readonly<Record<string, MutatorRule>> = {
   },
   ed: { operands: "all", valueLetters: "p" },
   ex: { operands: "all", valueLetters: "cs" },
+  // Interactive editors, driven from a script exactly like ex: every operand
+  // that is not a flag value is a file they can write back to.
+  vim: { operands: "all", valueLetters: "cs" },
+  vi: { operands: "all", valueLetters: "cs" },
+  nvim: { operands: "all", valueLetters: "cs" },
+  emacs: { operands: "all", valueLetters: "cs" },
   install: { operands: "destination", valueFlags: ["-m", "-o", "-g", "-t", "--mode", "--owner", "--group"] },
   ln: { operands: "all", valueFlags: ["-S", "--suffix", "-t", "--target-directory"] },
   mkdir: { operands: "all", valueFlags: ["-m", "--mode"] },
@@ -1391,7 +1484,7 @@ function analyzeFind(context: Context, words: readonly Word[], cwd: string): voi
       continue;
     }
     const command = basename(inner[0]?.expanded ?? inner[0]?.value ?? "").toLowerCase();
-    if (MUTATORS[command] || command === "sed" || command === "tar" || SHELLS.includes(command)) {
+    if (MUTATORS[command] || command === "sed" || command === "gsed" || command === "tar" || SHELLS.includes(command)) {
       destructive = true;
     }
     analyzeCommand(context, inner, cwd, [], false);
@@ -1454,9 +1547,11 @@ function analyzeUnzip(context: Context, words: readonly Word[], cwd: string): vo
  * operands at all and allowed it: `echo <path> | xargs rm -f` deleted a file
  * the guard had just read the name of. What is written on the line is still
  * analyzed, because `xargs rm <path>` puts the path there. What comes from the
- * pipe is not readable here, so a mutator fed by one is recorded as a target
- * that could not be resolved, which is the same answer this guard already gives
- * to `rm "$UNKNOWN"`: refuse when the command names a protected file, allow
+ * pipe, `-a`/`--arg-file`, or an input redirection (`xargs rm < paths.txt`,
+ * the same operand source as `-a` under a different spelling) is not readable
+ * here, so a mutator fed by one is recorded as a target that could not be
+ * resolved, which is the same answer this guard already gives to
+ * `rm "$UNKNOWN"`: refuse when the command names a protected file, allow
  * when it does not.
  */
 function analyzeXargs(context: Context, words: readonly Word[], cwd: string, fed: boolean): void {
@@ -1497,7 +1592,7 @@ function isWriter(name: string): boolean {
     || AWKS.includes(name)
     || SHELLS.includes(name)
     || INTERPRETERS.includes(name)
-    || ["apply_patch", "dd", "find", "git", "sed", "tar", "unzip"].includes(name);
+    || ["apply_patch", "dd", "find", "git", "sed", "gsed", "tar", "unzip"].includes(name);
 }
 
 function gitEffectiveCwd(words: readonly Word[], cwd: string): string {
@@ -1589,7 +1684,32 @@ function analyzeGit(context: Context, words: readonly Word[], cwd: string): void
   }
 }
 
+/**
+ * Shell-out calls inside an interpreter body, read the same way `analyzeAwk`
+ * reads `system()`: only a plain string literal argument can be established,
+ * so only that shape is walked into `analyzeCommandText`, where every table
+ * in this file, redirections, sed, xargs, applies to what the call would
+ * actually run. A variable, an f-string, a list built at runtime, or any
+ * other shape hides the command and is refused rather than guessed.
+ */
+function analyzeShellExecCalls(context: Context, code: string, cwd: string): void {
+  const calls = [...code.matchAll(SHELL_EXEC_MARKERS)];
+  for (const call of calls) {
+    const start = (call.index ?? 0) + call[0].length;
+    const rest = code.slice(start).replace(/^\s+/u, "");
+    const literal = /^(["'])([^"'\n]*)\1/u.exec(rest);
+    if (!literal) {
+      throw new GuardRefusal(
+        "opaque-interpreter-write",
+        "This interpreter body shells out through os.system, os.popen, subprocess, or child_process with a command that is not a plain string literal, so what it would run cannot be established.",
+      );
+    }
+    analyzeCommandText(context, literal[2] ?? "", cwd, context.depth + 1);
+  }
+}
+
 function analyzeCode(context: Context, code: string, cwd: string): void {
+  analyzeShellExecCalls(context, code, cwd);
   if (!WRITE_MARKERS.test(code)) {
     return;
   }
@@ -1912,7 +2032,11 @@ function analyzeSegment(context: Context, segment: Segment, cwd: string): string
     }
   }
 
-  return analyzeCommand(context, rawWords, cwd, segment.heredocs, segment.pipedInto);
+  // `xargs < file` reads its operand list from that file exactly as
+  // `xargs -a file` or a pipe would; the shell lexer has already recorded
+  // the redirection here, so it is read off the segment rather than the words.
+  const redirectedIn = segment.redirections.some((redirection) => redirection.operator === "<");
+  return analyzeCommand(context, rawWords, cwd, segment.heredocs, segment.pipedInto, redirectedIn);
 }
 
 /**
@@ -1928,6 +2052,7 @@ function analyzeCommand(
   cwd: string,
   heredocs: readonly string[],
   pipedInto: boolean,
+  redirectedIn = false,
 ): string {
   const words = resolveCommand(context, rawWords);
   const first = words[0];
@@ -2027,7 +2152,7 @@ function analyzeCommand(
     return cwd;
   }
 
-  if (name === "sed") {
+  if (name === "sed" || name === "gsed") {
     analyzeSed(context, words, cwd);
     return cwd;
   }
@@ -2053,7 +2178,7 @@ function analyzeCommand(
   }
 
   if (name === "xargs") {
-    analyzeXargs(context, words, cwd, pipedInto);
+    analyzeXargs(context, words, cwd, pipedInto || redirectedIn);
     return cwd;
   }
 
@@ -2263,6 +2388,14 @@ export function evaluateGuard(input: GuardInput): GuardVerdict {
 /** The paths this guard protects, exposed so `guard` can explain itself. */
 export function protectedRelativePaths(config: VaultConfig): string[] {
   const memory = config.paths.memory.length > 0 ? config.paths.memory : "10_memory";
-  return PROTECTED_FILENAMES.map((name) =>
+  const configured = PROTECTED_FILENAMES.map((name) =>
     [memory, PREFERENCES_DIRECTORY, name].join("/"));
+  const hardcodedFiles = HARDCODED_PROTECTED_FILES.map((path) => path.replace(/\\/gu, "/"));
+  const hardcodedDirectories = HARDCODED_PROTECTED_DIRECTORIES.map(
+    (directory) => directory.replace(/\\/gu, "/"),
+  );
+  // The configured kernel files and the hardcoded redline targets name the
+  // same two paths whenever memory is still "10_memory": deduped so a caller
+  // walking this list does not check the same path twice.
+  return [...new Set([...configured, ...hardcodedFiles, ...hardcodedDirectories])];
 }

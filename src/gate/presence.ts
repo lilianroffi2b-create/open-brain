@@ -10,11 +10,17 @@ import { ExpectedError } from "../core/errors.js";
  * command line flag, because a flag is something the caller writes about
  * itself, and a caller that can write the request can write the approval too.
  *
- * The only thing in a shell that a composed pipeline cannot fabricate about
- * itself is a terminal on standard input. It is not a perfect proof, and it is
- * not meant to be: a person can still hand their terminal to an agent. It is
- * the difference between a claim and a fact, and it is the strongest fact a
- * command line program can obtain without a second channel.
+ * A terminal on standard input is not proof a human is there. It is an
+ * ergonomic signal, not a security guarantee: a process that allocates its own
+ * pseudo-terminal (`posix_openpt` and equivalents, available to any script
+ * without a real user in the loop) reports `isTTY === true` with nobody
+ * watching. This check catches an ordinary pipeline built by mistake or by
+ * habit; it does not catch a process built specifically to defeat it, and
+ * cannot without a second channel this module does not have. A person can
+ * also hand their terminal to an agent, which is the weaker and more common
+ * case this was written for. Say what this buys plainly: it raises the bar
+ * for an accidental or careless automated write. It does not raise it against
+ * a deliberate one.
  *
  * Both doors into the kernel use this module, `sync validate` and `prefs add`
  * or `prefs log`, because a guarantee that holds on one door and not on the

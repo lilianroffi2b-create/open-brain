@@ -179,7 +179,10 @@ test("twelve former stack traces: the seven fixable from this lot's perimeter ar
   assertCleanRefusal(corruptList, "prefs list on a corrupted ledger");
   assert.match(corruptList.stderr, /Invalid preference ledger/u);
 
-  const corruptRegen = await runBuiltCli(["prefs", "regen", "--root", root], root);
+  // prefs regen now demands the same human-presence proof as prefs add and
+  // prefs log; --unattended keeps this a test of the corrupted-ledger
+  // refusal rather than of the presence gate.
+  const corruptRegen = await runBuiltCli(["prefs", "regen", "--root", root, "--unattended"], root);
   assertCleanRefusal(corruptRegen, "prefs regen on a corrupted ledger");
   assert.match(corruptRegen.stderr, /Invalid preference ledger/u);
 

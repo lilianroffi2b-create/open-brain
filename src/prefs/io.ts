@@ -216,6 +216,21 @@ export interface PreferenceOperationOptions {
   /** Command name recorded as the provenance of every resulting write. */
   command?: string;
   lock?: LockOptions;
+  /**
+   * Checked against the ledger as it is INSIDE the lock, just before the
+   * operation is applied, and expected to throw when it does not hold.
+   *
+   * A caller that checks a precondition before calling this function has
+   * checked a ledger that is already stale: the lock is taken here, so anything
+   * read before it belongs to a vault that another writer may have changed
+   * since. That gap is not theoretical. The sync gate preflights every approved
+   * item against the ledger, then freezes the decision, then writes, and a
+   * `prefs log` from another terminal in between used to be enough for a weight
+   * bump computed from 3 to land on a preference that already weighed 4. The
+   * hook exists so the last word on a precondition is spoken under the lock,
+   * where it cannot be overtaken.
+   */
+  precondition?: (ledger: PreferenceLedger) => void;
 }
 
 export interface PreferenceOperationResult {
@@ -246,6 +261,8 @@ export async function runPreferenceOperation(
   return withPreferenceLock(vaultRoot, async () => {
     // Read inside the lock: anything the caller read before is already stale.
     const ledger = await loadPreferenceLedger(vaultRoot);
+    // And checked here rather than by the caller, for exactly the same reason.
+    options.precondition?.(ledger);
     const outcome = applyPreferenceOperation(ledger, input, options.now ?? new Date());
     if (outcome.kind !== "applied") {
       return {

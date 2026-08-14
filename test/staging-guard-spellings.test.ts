@@ -343,3 +343,71 @@ test("a notebook write is judged, not skipped", () => {
   });
   assert.equal(unreadable.decision, "deny");
 });
+
+// ---------------------------------------------------------------------------
+// 11: gsed, the interactive editors, and fish, spellings the table did not
+// recognize even though its sed, ex, and shell equivalents already were
+// ---------------------------------------------------------------------------
+
+test("gsed, the interactive editors, and fish are writers like their known equivalents", () => {
+  denies(`gsed -i 's/a/b/' ${CORE}`);
+  denies(`gsed -i.bak -e 's/a/b/' ${LEDGER}`);
+  denies(`vim ${CORE}`);
+  denies(`vi -c 'wq' ${CORE}`);
+  denies(`nvim -c '%d|x' ${CORE}`);
+  denies(`emacs ${CORE}`);
+  denies(`fish -c "rm ${LEDGER}"`);
+  denies(["fish", "-c", `rm ${LEDGER}`]);
+
+  // The reads that must not start refusing.
+  allows(`gsed -n '1,5p' ${CORE}`);
+  allows(`gsed 's/-i//' ${CORE}`);
+  allows(`vim -c 'q' /tmp/scratch.md`);
+  allows(`fish -c "cat ${CORE}"`);
+});
+
+// ---------------------------------------------------------------------------
+// 12: an interpreter body that shells out instead of writing directly
+// ---------------------------------------------------------------------------
+
+test("a shell-out call inside an interpreter body is read like the shell command it runs", () => {
+  denies(`python3 -c "import os; os.system('rm ${CORE}')"`);
+  denies(`python3 -c "import os; os.popen('rm ${LEDGER}')"`);
+  denies(`python3 -c "import subprocess; subprocess.run('rm ${CORE}', shell=True)"`);
+  denies(`python3 -c "import subprocess; subprocess.call('rm ${LEDGER}')"`);
+  denies(`python3 -c "import subprocess; subprocess.Popen('rm ${CORE}')"`);
+  denies(`node -e "const child_process = require('node:child_process'); child_process.execSync('rm ${CORE}')"`);
+  denies(`node -e "const child_process = require('node:child_process'); child_process.exec('rm ${LEDGER}')"`);
+
+  // Built from a variable rather than a plain literal: refused, not guessed,
+  // exactly as an awk system() call built at runtime already was.
+  assert.equal(
+    denies(`python3 -c "import os; cmd = 'rm ${CORE}'; os.system(cmd)"`).rule,
+    "opaque-interpreter-write",
+  );
+  assert.equal(
+    denies(
+      `node -e "const child_process = require('node:child_process'); const cmd = 'rm ${CORE}'; child_process.exec(cmd)"`,
+    ).rule,
+    "opaque-interpreter-write",
+  );
+
+  // A shell-out that only reads must not start refusing.
+  allows(`python3 -c "import os; os.system('ls /tmp')"`);
+  allows(`node -e "require('child_process').execSync('ls /tmp')"`);
+});
+
+// ---------------------------------------------------------------------------
+// 13: xargs fed through an input redirection instead of a pipe or -a
+// ---------------------------------------------------------------------------
+
+test("xargs fed through an input redirection is read the same as a pipe or -a", () => {
+  // Before this fix, a mutator behind `xargs < file` was analyzed with an
+  // empty operand list and no target was ever recorded, so this was a bare
+  // `allow` even though the command text names the kernel file directly.
+  assert.equal(denies(`xargs rm -f < ${CORE}`).rule, "unresolved-write-target");
+  assert.equal(denies(`xargs -0 rm -f < ${LEDGER}`).rule, "unresolved-write-target");
+
+  // A redirection unrelated to the kernel is not the guard's business.
+  allows(`xargs rm -f < /tmp/list`);
+});

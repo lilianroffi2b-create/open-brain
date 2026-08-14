@@ -1,5 +1,6 @@
 import { access, readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join, relative } from "node:path";
 
@@ -62,12 +63,26 @@ async function collectTests(directory) {
   return files;
 }
 
+/**
+ * Every vault carries a secret key, stored outside the vault under the user
+ * configuration directory (see src/core/secret.ts). A test run creates dozens of
+ * throwaway vaults, so it is pointed at a throwaway key directory too: a suite
+ * that leaves files in the real ~/.config of whoever ran it is a suite that
+ * cannot be run twice with confidence.
+ */
+function testEnvironment() {
+  return {
+    ...process.env,
+    OPEN_BRAIN_SECRET_DIR: join(tmpdir(), "open-brain-test-keys"),
+  };
+}
+
 function runNodeTests(files) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       ["--import", "tsx", "--test", ...files],
-      { cwd: projectRoot, stdio: "inherit" },
+      { cwd: projectRoot, stdio: "inherit", env: testEnvironment() },
     );
     child.once("error", reject);
     child.once("exit", (code, signal) => {

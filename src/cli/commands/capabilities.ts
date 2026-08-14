@@ -12,6 +12,13 @@ import {
 import { ExpectedError } from "../../core/errors.js";
 import type { VaultConfig } from "../../core/types.js";
 import {
+  assertHumanPresence,
+  humanPresenceFromStdin,
+  UNATTENDED_DESCRIPTION,
+  UNATTENDED_FLAG,
+  UNATTENDED_WARNING,
+} from "../../gate/presence.js";
+import {
   applyCapabilities,
   capabilityChildren,
   normalizeConsentPath,
@@ -397,8 +404,19 @@ const disableCommand = defineCommand({
       description: "Show what would be written without writing it.",
       default: false,
     },
+    [UNATTENDED_FLAG]: {
+      type: "boolean",
+      description: UNATTENDED_DESCRIPTION,
+      default: false,
+    },
   },
   async run({ args }) {
+    // Disarming a capability changes the vault's security posture exactly
+    // like a kernel write does, and it asked for no proof that a human, and
+    // not the agent composing the command, decided it. Same check, same
+    // escape hatch, as `prefs add` and `prefs log`.
+    const unattended = booleanArgument(args, UNATTENDED_FLAG);
+    assertHumanPresence(humanPresenceFromStdin(unattended), "`open-brain capabilities disable`");
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const config = await loadConfigForCli(root);
     const name = parseCapabilityName(requiredString(args, "name"));
@@ -424,6 +442,9 @@ const disableCommand = defineCommand({
           ? `Nothing to do: ${name} was already disarmed, and the config file was not touched.`
           : "Dry run, so nothing was written.",
     });
+    if (unattended) {
+      process.stderr.write(`${UNATTENDED_WARNING}\n`);
+    }
   },
 });
 

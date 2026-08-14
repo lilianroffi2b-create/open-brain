@@ -348,3 +348,55 @@ test("prefs log replayed with one operation id stacks one piece of evidence", as
   // creation and never replayed.
   assert.equal(preference.evidence.length, 2);
 });
+
+// ---------------------------------------------------------------------------
+// A6: security posture changes with the same missing proof
+// ---------------------------------------------------------------------------
+
+/**
+ * `capabilities disable`, `hooks uninstall`, and `prefs regen` do not write
+ * the ledger or the core directly, but each of them changes what the vault
+ * is willing to do, or republishes what every host CLI reads as law, and none
+ * of them used to ask for the one thing every other door into the kernel now
+ * demands: a terminal on standard input, or the same documented flag saying
+ * out loud that nobody was there.
+ */
+
+test("capabilities disable demands the same proof as sync validate", async (t) => {
+  const root = await newVault("open-brain-presence-capabilities-");
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const refused = await runCli(["capabilities", "disable", "hooks", "--root", root]);
+  assert.notEqual(refused.exitCode, 0, refused.stdout);
+  assert.match(refused.stderr, /not a terminal|--unattended/u);
+
+  const allowed = await runCli(["capabilities", "disable", "hooks", "--root", root, "--unattended"]);
+  assert.equal(allowed.exitCode, 0, allowed.stderr);
+  assert.match(allowed.stderr, /--unattended/u);
+});
+
+test("hooks uninstall demands the same proof as sync validate", async (t) => {
+  const root = await newVault("open-brain-presence-hooks-");
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const refused = await runCli(["hooks", "uninstall", "--root", root]);
+  assert.notEqual(refused.exitCode, 0, refused.stdout);
+  assert.match(refused.stderr, /not a terminal|--unattended/u);
+
+  const allowed = await runCli(["hooks", "uninstall", "--root", root, "--unattended"]);
+  assert.equal(allowed.exitCode, 0, allowed.stderr);
+  assert.match(allowed.stderr, /--unattended/u);
+});
+
+test("prefs regen demands the same proof as sync validate", async (t) => {
+  const root = await newVault("open-brain-presence-regen-");
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const refused = await runCli(["prefs", "regen", "--root", root]);
+  assert.notEqual(refused.exitCode, 0, refused.stdout);
+  assert.match(refused.stderr, /not a terminal|--unattended/u);
+
+  const allowed = await runCli(["prefs", "regen", "--root", root, "--unattended"]);
+  assert.equal(allowed.exitCode, 0, allowed.stderr);
+  assert.match(allowed.stderr, /--unattended/u);
+});

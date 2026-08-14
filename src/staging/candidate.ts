@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
 
+// Only the pure half of that module is used here, the keyed hash itself. The
+// key is read from disk by the callers, which is what keeps this file free of
+// any I/O of its own.
+import { vaultMac, type VaultSecret } from "../core/secret.js";
 import { sha256 } from "../core/text.js";
 import {
   ALLOWED_TRANSITIONS,
@@ -949,39 +953,74 @@ export function computeItemOperationId(index: number, item: unknown): string {
 }
 
 /**
+ * The three seals below are keyed, and that is the whole point of them.
+ *
+ * They used to be plain sha256 digests over the very document they sealed, so
+ * anybody able to write the file could recompute the seal and the check was a
+ * formality: a batch, an apply state or a frozen human decision could all be
+ * rewritten from scratch and would verify perfectly. Keyed with the vault
+ * secret, which lives outside the vault, they answer a different and much more
+ * useful question: was this document produced by a run of this gate, on this
+ * machine, or merely dropped in the directory.
+ *
+ * The domain tags keep the three apart. A state and a decision that happened to
+ * canonicalize to the same bytes would otherwise share a seal, and a seal that
+ * fits two documents vouches for neither.
+ */
+const BATCH_CONTENT_DOMAIN = "open-brain/batch-content/v1";
+const BATCH_STATE_DOMAIN = "open-brain/batch-state/v1";
+const BATCH_DECISION_DOMAIN = "open-brain/batch-decision/v1";
+
+/**
  * The signature of a batch, over everything that is a clause of the contract.
  *
  * prepared_at is excluded exactly like batch_id and content_hash: it is
- * freshness metadata, not a term a human decides on. Leaving it out keeps the
- * digest, and therefore the identifier, identical to what it would have been
- * without the field, so a batch written before the stamp existed still verifies
- * without a migration.
+ * freshness metadata, not a term a human decides on, so a batch keeps the same
+ * identity whether or not the stamp is there.
  */
-export function computeContentHash(batch: Record<string, unknown>): string {
+export function computeContentHash(
+  batch: Record<string, unknown>,
+  secret: VaultSecret,
+): string {
   const {
     batch_id: _batchId,
     content_hash: _contentHash,
     prepared_at: _preparedAt,
     ...rest
   } = batch;
-  return digest(rest);
+  return vaultMac(secret, BATCH_CONTENT_DOMAIN, canonicalJson(rest));
 }
 
 export function computeBatchId(contentHash: string): string {
   return `batch-${contentHash.slice(0, 24)}`;
 }
 
-export function computeStateHash(state: Record<string, unknown>): string {
+export function computeStateHash(
+  state: Record<string, unknown>,
+  secret: VaultSecret,
+): string {
   const { state_hash: _stateHash, ...rest } = state;
-  return digest(rest);
+  return vaultMac(secret, BATCH_STATE_DOMAIN, canonicalJson(rest));
 }
 
+/**
+ * The seal of one human decision, bound to the batch it was made about.
+ *
+ * The batch identifier is part of the sealed message on purpose. Without it the
+ * seal would only cover the approved and rejected numbers, which repeat across
+ * batches: a legitimate seal for "approve item 1" of one batch would then verify
+ * as a decision to approve item 1 of any other batch, and a decision file could
+ * be forged simply by copying a hash from the batch next door.
+ */
 export function computeDecisionHash(
   approvedIndices: readonly number[],
   rejectedIndices: readonly number[],
+  secret: VaultSecret,
+  batchId: string,
 ): string {
-  return digest({
+  return vaultMac(secret, BATCH_DECISION_DOMAIN, canonicalJson({
+    batch_id: batchId,
     approved_indices: [...approvedIndices],
     rejected_indices: [...rejectedIndices],
-  });
+  }));
 }

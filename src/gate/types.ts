@@ -110,6 +110,8 @@ export interface PresentationRecord {
   batch_id: string;
   presented_at: string;
   token: string;
+  /** Keyed with the vault secret, so the token cannot be chosen by its reader. */
+  seal: string;
 }
 
 /**
@@ -254,6 +256,13 @@ export interface UndoRecord {
   recorded_at: string;
   approved_indices: number[];
   targets: UndoTargetSnapshot[];
+  /**
+   * Keyed with the vault secret, which lives outside the vault. The per snapshot
+   * sha256 says the bytes are the ones the record names; this says the record
+   * itself came from a run of the gate rather than from whoever could write the
+   * directory. See gate/undo.ts sealUndoRecord.
+   */
+  seal: string;
 }
 
 export interface UndoSealTarget {
@@ -275,6 +284,8 @@ export interface UndoSeal {
   batch_id: string;
   sealed_at: string;
   targets: UndoSealTarget[];
+  /** Keyed with the vault secret. See gate/undo.ts sealUndoSeal. */
+  seal: string;
 }
 
 export interface UndoneMarker {
@@ -284,6 +295,8 @@ export interface UndoneMarker {
   undone_at: string;
   restored: string[];
   removed: string[];
+  /** Keyed with the vault secret. See gate/undo.ts sealUndoneMarker. */
+  seal: string;
 }
 
 export interface UndoResult {

@@ -2,6 +2,13 @@ import { defineCommand } from "citty";
 
 import { isEnabled } from "../../core/capabilities.js";
 import {
+  assertHumanPresence,
+  humanPresenceFromStdin,
+  UNATTENDED_DESCRIPTION,
+  UNATTENDED_FLAG,
+  UNATTENDED_WARNING,
+} from "../../gate/presence.js";
+import {
   codexHookStatus,
   CODEX_DIFFERENCES,
   HOOK_HOST_SUPPORT,
@@ -14,7 +21,7 @@ import {
   uninstallClaudeCodeHooks,
 } from "../../hooks/settings-merge.js";
 import { resolveVaultRoot } from "../vault.js";
-import { loadConfigForCli, optionalString, printJson, rootArgument } from "../shared.js";
+import { booleanArgument, loadConfigForCli, optionalString, printJson, rootArgument } from "../shared.js";
 
 /**
  * Wiring and unwiring the hooks on both hosts, and a status that says three
@@ -92,8 +99,22 @@ const uninstallCommand = defineCommand({
     name: "uninstall",
     description: "Remove only the Open Brain hook entries, leaving every other entry intact.",
   },
-  args: { ...rootArgument, ...targetArgument },
+  args: {
+    ...rootArgument,
+    ...targetArgument,
+    [UNATTENDED_FLAG]: {
+      type: "boolean",
+      description: UNATTENDED_DESCRIPTION,
+      default: false,
+    },
+  },
   async run({ args }) {
+    // Removing the hook wiring is what lets the N1 guard stop running before
+    // every tool call: a change to the vault's security posture exactly like
+    // disarming a capability, and it asked for no proof of a human either.
+    // Same check, same escape hatch, as `prefs add` and `prefs log`.
+    const unattended = booleanArgument(args, UNATTENDED_FLAG);
+    assertHumanPresence(humanPresenceFromStdin(unattended), "`open-brain hooks uninstall`");
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const targets = requestedTargets(optionalString(args, "target"));
     const results = [];
@@ -104,6 +125,9 @@ const uninstallCommand = defineCommand({
       results.push({ target, ...result });
     }
     printJson({ root, uninstalled: results });
+    if (unattended) {
+      process.stderr.write(`${UNATTENDED_WARNING}\n`);
+    }
   },
 });
 

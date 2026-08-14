@@ -735,6 +735,34 @@ test("invariant 10: compaction archives only terminal candidates and retries cle
   assert.equal(status.archive_files.length, 1);
 });
 
+test("invariant 12: a malformed resolved_ts is refused rather than turned into an archive path", async (t) => {
+  const root = await newVault("open-brain-staging-archive-month-");
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const created = await appendCandidate(root, armed, deposit({ source: "manual", raw_quote: "attempted traversal" }));
+  await transitionCandidate(root, armed, { id: created.candidate.id, status: "proposed", proposal: proposal() });
+  await transitionCandidate(root, armed, { id: created.candidate.id, status: "rejected" });
+
+  // Nothing that writes resolved_ts validates its shape beyond "a non-empty
+  // string or null" (see optionalStoredText in candidate.ts), so a forged or
+  // otherwise corrupted timestamp reaches archiveMonth exactly as written.
+  const paths = stagingPaths(root, armed);
+  const rows = (await readFile(paths.candidates, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const target = rows.find((row) => row.id === created.candidate.id);
+  assert.ok(target, "the candidate row must exist");
+  target.resolved_ts = "../../../../etc/passwd";
+  await writeFile(paths.candidates, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+
+  await assert.rejects(
+    compactStaging(root, armed),
+    (error: unknown) => error instanceof CorruptStoreError && /archive month/u.test((error as Error).message),
+    "a malformed resolved_ts must be refused, not joined into a path",
+  );
+});
+
 test("invariant 11: a full cycle never touches the preference kernel", async (t) => {
   const root = await newVault("open-brain-staging-kernel-");
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -1061,8 +1089,17 @@ test("the derivations the gate builds on are stable and content addressed", () =
   assert.equal(canonicalJson({ b: 1, a: [3, { d: 4, c: 5 }] }), '{"a":[3,{"c":5,"d":4}],"b":1}');
   assert.equal(computeSelectionId(["b", "a"]), computeSelectionId(["a", "b"]));
   assert.match(computeSelectionId(["a"]), /^selection-[0-9a-f]{24}$/u);
-  const hash = computeContentHash({ items: [1], batch_id: "ignored", content_hash: "ignored" });
-  assert.equal(hash, computeContentHash({ items: [1], batch_id: "other", content_hash: "other" }));
+  // A fixed key, so the assertion is about the derivation and not about which
+  // vault it ran in. The real one is read from outside the vault; see core/secret.ts.
+  const secret = { id: "test", path: "test", key: Buffer.alloc(32, 7) };
+  const hash = computeContentHash(
+    { items: [1], batch_id: "ignored", content_hash: "ignored" },
+    secret,
+  );
+  assert.equal(
+    hash,
+    computeContentHash({ items: [1], batch_id: "other", content_hash: "other" }, secret),
+  );
   assert.match(computeBatchId(hash), /^batch-[0-9a-f]{24}$/u);
 });
 

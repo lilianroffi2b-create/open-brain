@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { emptyBudget } from "../core/budget.js";
 import { atomicWriteText } from "../core/fs-atomic.js";
 import { runVaultScan } from "../core/scan.js";
+import { loadVaultSecret } from "../core/secret.js";
 import { sha256, toPosixPath } from "../core/text.js";
 import type { VaultConfig } from "../core/types.js";
 import { DEFAULT_LOADER_FILENAMES } from "../loaders/markers.js";
@@ -59,6 +60,9 @@ import {
   type UndoTargetSnapshot,
   type ValidateResult,
 } from "./types.js";
+// The undo record is written here and verified there, so the seal that binds it
+// to this vault is defined once, in the module that knows how to read it back.
+import { sealUndoRecord, sealUndoSeal } from "./undo.js";
 
 /**
  * The write half of the gate.
@@ -505,6 +509,19 @@ async function applyPreference(
   }
 }
 
+/**
+ * Changes one weight, after checking the precondition against the ledger as it
+ * is inside the preference lock rather than as it was during the preflight.
+ *
+ * The preflight reads the ledger before the decision is even frozen, so its
+ * answer about this preference is already old by the time the write runs: a
+ * `prefs log` from another terminal, or another item of a batch that touched the
+ * kernel first, moves the weight in between. A bump computed from 3 that lands
+ * on a preference already weighing 4 pushes it to 5 while reporting the move the
+ * human approved, which is the one thing a weight gate exists to prevent. So the
+ * precondition is checked a second time, under the lock, at the only moment
+ * where the answer is still true when the write happens.
+ */
 async function applyWeight(
   root: string,
   write: WeightWritePayload,
@@ -526,7 +543,22 @@ async function applyWeight(
       weight: write.args.weight,
       quote: write.args.quote,
     },
-    { command: "sync validate" },
+    {
+      command: "sync validate",
+      precondition: (ledger) => {
+        const preference = ledger.preferences.find((entry) => entry.id === write.args.id);
+        if (!preference) {
+          throw new SyncGateError(
+            `Preference ${write.args.id} is gone from the ledger, so its weight cannot change. It was not written and nothing else was applied.`,
+          );
+        }
+        if (preference.weight !== write.precondition.expected_current_weight) {
+          throw new SyncGateError(
+            `${write.args.id} weighed ${String(write.precondition.expected_current_weight)} when this item was approved and weighs ${String(preference.weight)} now, so somebody changed it in between. It was not written and nothing else was applied. Re-run the review so the proposal is computed from the weight it really has.`,
+          );
+        }
+      },
+    },
   );
   if (result.outcome.kind === "conflict") {
     throw new SyncGateError(
@@ -722,7 +754,8 @@ export async function validateApply(
     const rejected = batch.items
       .map((item) => item.index)
       .filter((index) => !approved.includes(index));
-    const hash = computeDecisionHash(approved, rejected);
+    const secret = await loadVaultSecret(root);
+    const hash = computeDecisionHash(approved, rejected, secret, batch.batch_id);
     if (state.decision !== null && state.decision.hash !== hash) {
       throw new SyncGateError(
         `Batch ${batch.batch_id} already carries a different decision (approved ${state.decision.approved_indices.join(", ") || "nothing"}). A decision is frozen once. Resume it with \`open-brain sync resume --batch ${batch.batch_id}\`.`,
@@ -739,6 +772,16 @@ export async function validateApply(
     // that everything after it replays. A decision that is about to exist for
     // the first time is the exact moment, and the only moment, where a human
     // has to be proven present.
+    //
+    // The waiver below rests on one fact and not on the existence of a file.
+    // loadBatchDecision returns a decision only when its hash verifies under the
+    // key of this vault, which lives outside the vault and which no writer of
+    // the staging directory has: a decision file that is merely present, and
+    // whose hash anybody could recompute with the exported helpers of this
+    // package, is refused by the parser before it ever gets here. So the two
+    // branches are "a human is proven present right now" and "a run that held
+    // this vault key already proved one", never "a file with the right name is
+    // sitting in the directory".
     if (!existingDecision) {
       await assertDecisionProof(root, config, batch, input.proof);
     }
@@ -817,7 +860,7 @@ export async function validateApply(
       for (const target of undoTargets) {
         snapshots.push(await snapshotTarget(root, target));
       }
-      const record: UndoRecord = {
+      const unsealed: Omit<UndoRecord, "seal"> = {
         schema: SYNC_UNDO_SCHEMA,
         schema_version: SYNC_SCHEMA_VERSION,
         batch_id: batch.batch_id,
@@ -825,6 +868,7 @@ export async function validateApply(
         approved_indices: approved,
         targets: snapshots,
       };
+      const record: UndoRecord = { ...unsealed, seal: sealUndoRecord(unsealed, secret) };
       await writeImmutableJson(paths.undo, record, "The undo record for this batch");
     }
 
@@ -961,13 +1005,14 @@ export async function validateApply(
       for (const target of undoTargets) {
         sealed.push(await sealTarget(root, target));
       }
-      const seal: UndoSeal = {
+      const unsealed: Omit<UndoSeal, "seal"> = {
         schema: SYNC_UNDO_SEAL_SCHEMA,
         schema_version: SYNC_SCHEMA_VERSION,
         batch_id: batch.batch_id,
         sealed_at: nowTimestamp(),
         targets: sealed,
       };
+      const seal: UndoSeal = { ...unsealed, seal: sealUndoSeal(unsealed, secret) };
       await writeImmutableJson(paths.seal, seal, "The undo seal for this batch");
     }
 

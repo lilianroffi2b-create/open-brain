@@ -72,6 +72,50 @@ await withPreferenceLock(root, async () => {
 });
 `;
 
+/**
+ * Holds the preference lock and, on the signal, changes a weight before letting
+ * go. That is the exact window the gate used to write into: the preflight reads
+ * the ledger, the decision is frozen, and the write happens later, so anything
+ * that changes the weight in between was accepted on the strength of a check
+ * that was already false.
+ */
+const WEIGHT_RACE_SCRIPT = `
+import { access, writeFile } from "node:fs/promises";
+import { loadPreferenceLedger, savePreferenceLedger, withPreferenceLock } from ${JSON.stringify(prefsModuleUrl)};
+
+// Through the environment rather than through argv: with --eval, node shifts
+// what the extra arguments land on, and a script that locks the wrong path
+// while the test believes it holds the right one is a test that proves nothing.
+const root = process.env.RACE_ROOT;
+const readyPath = process.env.RACE_READY;
+const goPath = process.env.RACE_GO;
+await withPreferenceLock(root, async () => {
+  await writeFile(readyPath, "held", "utf8");
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    try {
+      await access(goPath);
+      break;
+    } catch {
+      if (Date.now() > deadline) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  const ledger = await loadPreferenceLedger(root);
+  await savePreferenceLedger(
+    root,
+    {
+      ...ledger,
+      preferences: ledger.preferences.map((entry) =>
+        entry.id === "existing-rule" ? { ...entry, weight: 4 } : entry),
+    },
+    { command: "prefs log" },
+  );
+});
+`;
+
 const NOTE_RELATIVE_PATH = join("10_memory", "notes", "project_deploy.md");
 
 function preference(id: string, weight: 1 | 2 | 3 | 4 | 5): Preference {
@@ -323,6 +367,89 @@ test("a note that moved between the preflight and the write is not overwritten",
     foreign,
     "the file somebody else wrote is still theirs",
   );
+});
+
+function weightItem(id: string): Record<string, unknown> {
+  return {
+    id,
+    type: "weight",
+    target: "existing-rule",
+    content: "Raise the weight of existing-rule to 4.",
+    proposed_weight: 4,
+    reason: "Stated twice, on two different days.",
+    proofs: [
+      { date: "2026-07-19", quote: "existing-rule matters" },
+      { date: "2026-07-20", quote: "existing-rule really matters" },
+    ],
+    status: "proposed",
+    evidence_basis: "recurrence",
+  };
+}
+
+test("a weight that moved between the preflight and the write is not bumped again", async (t) => {
+  const root = await newVault("open-brain-apply-weight-toctou-");
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const [first, second] = await stageTwo(root);
+  const prepared = await prepareBatch(root, config, {
+    items: parseClassification([
+      // Item 1 is the note, so it is written first and without the kernel lock.
+      // Item 2 is the weight bump, and it blocks on the lock the other process
+      // holds, which is where the window this test is about lives.
+      noteItem(first, "The deploy target is staging."),
+      weightItem(second),
+    ]) as ClassificationItem[],
+    selectionId: await selection(root),
+  });
+
+  const readyPath = join(root, "lock-held");
+  const goPath = join(root, "lock-release");
+  const holder = spawn(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", WEIGHT_RACE_SCRIPT],
+    {
+      cwd: projectRoot,
+      stdio: "ignore",
+      env: { ...process.env, RACE_ROOT: root, RACE_READY: readyPath, RACE_GO: goPath },
+    },
+  );
+  t.after(() => {
+    holder.kill();
+  });
+  const exited = new Promise<void>((resolve) => {
+    holder.once("exit", () => {
+      resolve();
+    });
+  });
+  for (let attempt = 0; attempt < 400 && !await pathExists(readyPath); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(await pathExists(readyPath), "the other process holds the preference lock");
+
+  const applying = validateAsHuman(root, prepared.batch_id, "1,2").then(
+    () => null,
+    (error: unknown) => error,
+  );
+  const paths = batchPaths(root, config, prepared.batch_id);
+  // The undo record lands after every preflight, so its arrival proves the
+  // weight was checked against a ledger that still said 3.
+  for (let attempt = 0; attempt < 400 && !await pathExists(paths.undo); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(await pathExists(paths.undo), "every item was preflighted");
+
+  // Somebody else raises the weight to 4 and only then lets the lock go.
+  await writeFile(goPath, "go", "utf8");
+  await exited;
+
+  const failure = await applying;
+  assert.ok(failure instanceof SyncGateError, String(failure));
+  assert.match(String(failure), /weighed 3 when this item was approved and weighs 4 now/u);
+
+  // 4 was where somebody else put it. A bump computed from 3 and applied to 4
+  // would have left 5, silently, while reporting the move that was approved.
+  const ledger = await loadPreferenceLedger(root);
+  assert.equal(ledger.preferences.find((entry) => entry.id === "existing-rule")?.weight, 4);
 });
 
 test("an unreadable ledger is reported as unreadable, not as a ledger that is absent", async (t) => {

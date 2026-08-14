@@ -151,6 +151,12 @@ function optionalDomainList(args: unknown, name: string): string[] | undefined {
  * the same thing: a terminal on standard input, or the documented flag that
  * says out loud it is writing with no human present.
  *
+ * `prefs regen` uses the same check for a narrower reason: it republishes the
+ * always-on core and the loader mirrors every host CLI reads, from whatever
+ * the ledger currently holds. There is no new text and no batch behind it
+ * either, so a kernel write with nothing proving a human asked for it was
+ * exactly as unguarded here as it was on the other two.
+ *
  * There is no confirmation token here and there does not need to be. The token
  * proves that somebody read a text the machine wrote; here the text is typed in
  * the same command by the person the presence check is about.
@@ -709,8 +715,13 @@ const prefsCommand = defineCommand({
         name: "regen",
         description: "Regenerate the preference core and portable loader mirrors.",
       },
-      args: rootArgument,
+      args: { ...rootArgument, ...unattendedArgument },
       async run({ args }) {
+        // Regenerating the core rewrites what every host CLI reads as the
+        // always-on preference set. That is a kernel write like `prefs add`
+        // and `prefs log`, and it went through this door with nothing behind
+        // it: the same presence contract applies here now.
+        const unattended = assertPreferenceWriteIsHuman(args, "prefs regen");
         const root = await resolveVaultRoot(optionalString(args, "root"));
         const mirrors = await withPreferenceLock(root, async () => {
           const ledger = await loadPreferenceLedger(root);
@@ -720,6 +731,9 @@ const prefsCommand = defineCommand({
           core_path: PREFERENCE_CORE_RELATIVE_PATH,
           loader_mirrors: mirrors,
         });
+        if (unattended) {
+          process.stderr.write(`${UNATTENDED_WARNING}\n`);
+        }
       },
     }),
     log: defineCommand({

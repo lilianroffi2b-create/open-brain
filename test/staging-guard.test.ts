@@ -390,6 +390,10 @@ test("the verdict is the shape the hook expects, and evaluation is pure", () => 
   assert.deepEqual(protectedRelativePaths(DEFAULT_CONFIG), [
     "10_memory/preferences/_ledger.json",
     "10_memory/preferences/_core.md",
+    ".open-brain/local/prefs-redline.json",
+    ".open-brain/local/prefs-redline.jsonl",
+    "00_index/vault.config.yml",
+    "10_memory/staging/batches",
   ]);
 });
 
@@ -398,7 +402,7 @@ test("a working directory outside the vault does not create a false refusal", ()
   assert.equal(bash("rm _core.md", `${VAULT}/10_memory/preferences`).decision, "deny");
 });
 
-test("the guard follows the configured memory path, it never hard codes it", () => {
+test("the guard follows the configured memory path, but the hardcoded redline targets stay protected regardless", () => {
   const renamed = {
     ...DEFAULT_CONFIG,
     paths: { ...DEFAULT_CONFIG.paths, memory: "memory" },
@@ -411,11 +415,44 @@ test("the guard follows the configured memory path, it never hard codes it", () 
   });
   assert.equal(denied.decision, "deny");
 
+  // The default location, 10_memory/preferences, is also where
+  // REDLINE_TARGET_PATHS points, hard coded in src/prefs/redline.ts and
+  // never derived from config.paths.memory. Renaming memory: in
+  // vault.config.yml moves the configured half of the perimeter; it cannot
+  // move the real kernel out from under the redline half.
   const stale = evaluateGuard({
     tool: "Bash",
     toolInput: { command: `rm ${LEDGER}` },
     vaultRoot: VAULT,
     config: renamed,
   });
-  assert.equal(stale.decision, "allow", "the old location is no longer the kernel");
+  assert.equal(stale.decision, "deny", "config.paths.memory must not be able to unprotect the real kernel");
+});
+
+test("the redline record, the staging batches, and the vault config are protected no matter what config.paths.memory says", () => {
+  const renamed = {
+    ...DEFAULT_CONFIG,
+    paths: { ...DEFAULT_CONFIG.paths, memory: "renamed_memory" },
+  };
+  for (const target of [
+    ".open-brain/local/prefs-redline.json",
+    ".open-brain/local/prefs-redline.jsonl",
+    "10_memory/staging/batches/candidates.jsonl",
+    "10_memory/staging/batches/nested/deep.jsonl",
+    "00_index/vault.config.yml",
+  ]) {
+    for (const config of [DEFAULT_CONFIG, renamed]) {
+      const verdict = evaluateGuard({
+        tool: "Bash",
+        toolInput: { command: `printf x > ${target}` },
+        vaultRoot: VAULT,
+        config,
+      });
+      assert.equal(
+        verdict.decision,
+        "deny",
+        `${target} must stay protected even when memory: is ${config.paths.memory}`,
+      );
+    }
+  }
 });

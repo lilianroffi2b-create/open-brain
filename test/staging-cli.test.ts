@@ -250,6 +250,10 @@ test("the guard command answers with the verdict and a non-zero exit code on a r
   assert.deepEqual(verdict.protected_paths, [
     "10_memory/preferences/_ledger.json",
     "10_memory/preferences/_core.md",
+    ".open-brain/local/prefs-redline.json",
+    ".open-brain/local/prefs-redline.jsonl",
+    "00_index/vault.config.yml",
+    "10_memory/staging/batches",
   ]);
 
   const allowed = await runGuard([

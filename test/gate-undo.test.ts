@@ -7,13 +7,14 @@ import test from "node:test";
 
 import { parseClassification, type ClassificationItem } from "../src/classifier/contract.js";
 import { DEFAULT_CONFIG } from "../src/core/config.js";
+import { loadVaultSecret } from "../src/core/secret.js";
 import { sha256, toPosixPath } from "../src/core/text.js";
 import type { VaultConfig } from "../src/core/types.js";
 import { validateApply } from "../src/gate/apply.js";
 import { HumanPresenceError } from "../src/gate/presence.js";
 import { batchPaths, prepareBatch, showBatch, syncPending, syncStaged } from "../src/gate/review.js";
 import { SyncGateError, type UndoResult, type ValidateResult } from "../src/gate/types.js";
-import { SYNC_UNDOING_SCHEMA, undoBatch } from "../src/gate/undo.js";
+import { sealUndoProgress, SYNC_UNDOING_SCHEMA, undoBatch } from "../src/gate/undo.js";
 import { DEFAULT_LOADER_FILENAMES } from "../src/loaders/markers.js";
 import {
   createPreferenceLedger,
@@ -498,6 +499,37 @@ function progressPath(root: string, batchId: string): string {
   return join(batchPaths(root, config, batchId).directory, `${batchId}.undoing.json`);
 }
 
+/**
+ * Reconstructs by hand the record a run interrupted halfway would have left,
+ * SEALED with the key of the vault, which is what a real interrupted run holds
+ * and a forger does not. Writing it unsealed is a separate test, and it is
+ * refused.
+ */
+async function writeProgress(
+  root: string,
+  batchId: string,
+  restored: string[],
+  removed: string[] = [],
+  options: { sealed?: boolean } = {},
+): Promise<void> {
+  const progress = {
+    schema: SYNC_UNDOING_SCHEMA,
+    schema_version: 1,
+    batch_id: batchId,
+    started_at: "2026-08-02T10:00:00.000Z",
+    restored,
+    removed,
+  } as const;
+  const seal = options.sealed === false
+    ? "0".repeat(64)
+    : sealUndoProgress(progress, await loadVaultSecret(root));
+  await writeFile(
+    progressPath(root, batchId),
+    `${JSON.stringify({ ...progress, seal }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 test("a reversal stopped halfway is resumable, and says so instead of a stack trace", skipOnWindows, async (t) => {
   const root = await newVault("open-brain-undo-interrupted-");
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -566,18 +598,7 @@ test("a reversal that was interrupted is checked against what it already put bac
     await writeFile(join(root, target.path), target.content, "utf8");
     restored.push(target.path);
   }
-  await writeFile(
-    progressPath(root, batchId),
-    `${JSON.stringify({
-      schema: SYNC_UNDOING_SCHEMA,
-      schema_version: 1,
-      batch_id: batchId,
-      started_at: "2026-08-02T10:00:00.000Z",
-      restored,
-      removed: [],
-    }, null, 2)}\n`,
-    "utf8",
-  );
+  await writeProgress(root, batchId, restored);
 
   const result = await undoBatch(root, config, batchId, { yes: true, proof: { kind: "replay" } });
   assert.equal(result.already_undone, false);
@@ -596,18 +617,7 @@ test("an empty progress record buys nothing: it claims nothing was put back", as
   // A record anybody can write, claiming a reversal is under way so that the
   // proof of a human is waived. It claims nothing was restored, so it is
   // evidence of nothing.
-  await writeFile(
-    progressPath(root, batchId),
-    `${JSON.stringify({
-      schema: SYNC_UNDOING_SCHEMA,
-      schema_version: 1,
-      batch_id: batchId,
-      started_at: "2026-08-02T10:00:00.000Z",
-      restored: [],
-      removed: ["10_memory/notes/nothing_of_the_sort.md"],
-    }, null, 2)}\n`,
-    "utf8",
-  );
+  await writeProgress(root, batchId, [], ["10_memory/notes/nothing_of_the_sort.md"]);
 
   await assert.rejects(
     () => undoBatch(root, config, batchId, { yes: true, proof: { kind: "replay" } }),
@@ -625,18 +635,7 @@ test("a file touched after an interrupted reversal still stops the retry", async
   const ledger = record.targets.find((target) => target.kind === "preference_ledger");
   assert.ok(ledger?.content !== undefined && ledger.content !== null);
   await writeFile(join(root, ledger.path), ledger.content, "utf8");
-  await writeFile(
-    progressPath(root, batchId),
-    `${JSON.stringify({
-      schema: SYNC_UNDOING_SCHEMA,
-      schema_version: 1,
-      batch_id: batchId,
-      started_at: "2026-08-02T10:00:00.000Z",
-      restored: [ledger.path],
-      removed: [],
-    }, null, 2)}\n`,
-    "utf8",
-  );
+  await writeProgress(root, batchId, [ledger.path]);
   await writeFile(join(root, ledger.path), `${ledger.content}\n`, "utf8");
 
   await assert.rejects(

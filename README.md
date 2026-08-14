@@ -222,7 +222,9 @@ On a CLI with no hooks, nothing runs by itself, and Open Brain says so rather th
 
 Direct writes to the preference ledger and its generated core are refused before they happen by a pre-effect guard, but that guard lives inside a `PreToolUse` hook. Under a host CLI with no hooks, or with the `hooks` capability disarmed, that guard does not run at all.
 
-A second, independent layer runs after the fact regardless of hooks: every legitimate write to the preference kernel is recorded with its provenance, and any content that does not match the last recorded write is **detected**. It is not prevented. Nothing in Open Brain makes the preference kernel impossible to modify by hand; the second layer makes a modification impossible to hide. That record lives under `.open-brain/local/`, outside the indexed vault, excluded from git, and it never travels with the vault.
+A second, independent layer runs after the fact regardless of hooks: every legitimate write to the preference kernel is recorded with its provenance, and any content that does not match the last recorded write is **detected**. It is not prevented. Nothing in Open Brain makes the preference kernel impossible to modify by hand; the second layer makes a modification impossible to hide. That record lives under `.open-brain/local/`, outside the indexed vault, excluded from git, and it never travels with the vault, sealed with a key that also lives outside the vault so the record cannot forge itself.
+
+Neither layer is invulnerable, and both are named plainly rather than oversold: the guard recognizes known ways of writing a file, not every conceivable one, and the terminal check behind `sync validate`, `sync undo`, and `prefs add`/`prefs log` is an ergonomic signal a determined automated caller can fake, not a cryptographic proof a human was there. See [Known limitations](SECURITY.md#known-limitations) for what each one does and does not catch.
 
 ## Neither the gate nor consolidation depend on git
 
