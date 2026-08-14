@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/sync-undo-seal.schema.json",
+  "title": "OpenBrain Sync Undo Seal",
+  "description": "Written as <batch_id>.undo-seal.json under 10_memory/staging/batches/ once every approved item of a batch has finished applying. It fingerprints what every target looked like right after the batch, so `open-brain sync undo` can refuse to restore over a file someone edited afterwards instead of silently overwriting their work. Immutable once written.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "batch_id", "sealed_at", "targets"],
+  "properties": {
+    "schema": { "const": "open-brain/sync-undo-seal/v1" },
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "batch_id": { "type": "string", "pattern": "^batch-[0-9a-f]{24}$" },
+    "sealed_at": { "type": "string", "format": "date-time" },
+    "targets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sealedTarget" }
+    }
+  },
+  "$defs": {
+    "sealedTarget": {
+      "title": "Fingerprint of one file right after the batch was applied",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "exists", "sha256"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["preference_ledger", "preference_core", "loader_mirror", "memory_note"]
+        },
+        "path": {
+          "type": "string",
+          "description": "Vault-relative path of the target."
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Null exactly when exists is false."
+        }
+      }
+    }
+  }
+}

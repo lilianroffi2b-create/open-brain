@@ -31,6 +31,10 @@ export interface VaultPaths {
   sources: string;
   outputs: string;
   engine: string;
+  /** Staging area for candidates awaiting human review. */
+  staging: string;
+  /** Manual memory notes the gate may write into. */
+  notes: string;
 }
 
 export interface PalierConfig {
@@ -38,6 +42,134 @@ export interface PalierConfig {
   p2_max: number;
   p3_max: number;
   shard_from: "P1" | "P2" | "P3" | "P4";
+}
+
+export type ClassifierProvider = "none" | "claude-code-subagent";
+
+export interface HooksCapabilityConfig {
+  enabled: boolean;
+  targets: string[];
+  /** Per-hook time budget, in milliseconds. Overridden by OPEN_BRAIN_HOOK_BUDGET_MS. */
+  budget_ms: number;
+}
+
+export interface CaptureCapabilityConfig {
+  enabled: boolean;
+}
+
+export interface TranscriptsCapabilityConfig {
+  enabled: boolean;
+  roots: string[];
+  redact: boolean;
+}
+
+export interface ClassifierCapabilityConfig {
+  enabled: boolean;
+  provider: ClassifierProvider;
+  daily_call_budget: number;
+}
+
+export interface LearningCapabilityConfig {
+  enabled: boolean;
+  evaluate: boolean;
+  consolidate: boolean;
+}
+
+/**
+ * Every capability that costs money, reads outside the vault, or changes
+ * behavior is declared here and ships disarmed. Absent or malformed values read
+ * as disarmed, so a vault written before capabilities existed loads unchanged
+ * and with nothing armed.
+ */
+export interface CapabilitiesConfig {
+  hooks: HooksCapabilityConfig;
+  capture: CaptureCapabilityConfig;
+  transcripts: TranscriptsCapabilityConfig;
+  classifier: ClassifierCapabilityConfig;
+  learning: LearningCapabilityConfig;
+}
+
+/** Tuning for the staging area CLI, distinct from capabilities.capture. */
+export interface StagingTuningConfig {
+  /** Default character cap of `staging list` and `staging show`. */
+  max_chars: number;
+}
+
+export interface CaptureMarkerPackConfig {
+  id: string;
+  explicit_request: string[];
+  correction: string[];
+  correction_lead: string[];
+  praise: string[];
+  praise_negations: string[];
+  praise_meta_words: string[];
+}
+
+export interface CaptureMarkerLimitsConfig {
+  max_correction_chars: number;
+  negation_window_chars: number;
+  meta_window_chars: number;
+  max_markers_per_message: number;
+}
+
+export interface CaptureMarkersConfig {
+  /** Ids of the built-in packs to load, for example ["en"]. */
+  packs: string[];
+  custom: CaptureMarkerPackConfig[];
+  limits: CaptureMarkerLimitsConfig;
+}
+
+export interface CaptureScanLimitsConfig {
+  max_messages_per_scan: number;
+  max_candidates_per_scan: number;
+  transcript_max_bytes: number;
+  transcript_max_lines: number;
+}
+
+/** Tuning for the capture pre-filter, distinct from capabilities.capture. */
+export interface CaptureTuningConfig {
+  markers: CaptureMarkersConfig;
+  limits: CaptureScanLimitsConfig;
+}
+
+export interface LearningHistoryConfig {
+  /** Belief history entries kept before the overflow folds into one summary. */
+  max_entries: number;
+}
+
+export interface LearningCirculationConfig {
+  read_tools: string[];
+  write_tools: string[];
+  max_partitions: number;
+  max_entries: number;
+}
+
+export interface LearningSensorsConfig {
+  circulation: LearningCirculationConfig;
+}
+
+export interface LearningEvaluatorConfig {
+  correction_window_turns: number;
+  confirmation_window_turns: number;
+  dead_output_days: number;
+  rapid_followup_seconds: number;
+  session_closed_hours: number;
+}
+
+export interface LearningInjectionConfig {
+  max_chars: number;
+  max_law: number;
+  max_active: number;
+  statement_clip: number;
+  drift_alert_tokens: number;
+}
+
+/** Tuning for the learning layer, distinct from capabilities.learning. */
+export interface LearningTuningConfig {
+  history: LearningHistoryConfig;
+  sensors: LearningSensorsConfig;
+  evaluator: LearningEvaluatorConfig;
+  injection: LearningInjectionConfig;
 }
 
 export interface VaultConfig {
@@ -63,6 +195,10 @@ export interface VaultConfig {
     active_paths: string[];
     active_dir_prefixes: string[];
   };
+  capabilities: CapabilitiesConfig;
+  staging: StagingTuningConfig;
+  capture: CaptureTuningConfig;
+  learning: LearningTuningConfig;
 }
 
 export interface CatalogRecord {

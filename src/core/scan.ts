@@ -1,9 +1,17 @@
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
-import { extname, join, relative } from "node:path";
+import { extname, isAbsolute, join, relative } from "node:path";
 
+import { loadCatalog } from "./catalog.js";
 import { excludedParts, palier, shardsEnabled } from "./config.js";
 import { buildGraph } from "./graph.js";
-import { canonicalJson } from "./index-writer.js";
+import {
+  canonicalJson,
+  writeIndexArtifacts,
+  SCAN_LOCK_NAME,
+  type WriteIndexOptions,
+  type WriteIndexResult,
+} from "./index-writer.js";
+import { lockPathFor, withLock, type LockOptions } from "./lock.js";
 import {
   activePathsFromConfig,
   contentAgeDays,
@@ -38,10 +46,19 @@ export interface ScanOptions {
   previousRecords?: CatalogRecord[];
   gitTimes?: ReadonlyMap<string, number>;
   maxFileBytes?: number;
+  /** Shared budget for the git history calls, in milliseconds. */
+  gitTimeoutMs?: number;
 }
 
 const LOADER_NAMES = new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md"]);
 const TOOL_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".py", ".sh"]);
+
+/**
+ * Directory holding the cross-process lock files, relative to the vault root.
+ * See core/lock.ts: a scan runs while its own lock file exists, so the walk must
+ * not see it. Lock files are infrastructure, never vault content.
+ */
+const LOCK_DIRECTORY_RELATIVE_PATH = "00_index/.locks";
 
 function relativePath(root: string, path: string): string {
   return toPosixPath(relative(root, path));
@@ -233,52 +250,96 @@ function hasExcludedPart(relativeFilePath: string, excluded: ReadonlySet<string>
     .some((part) => excluded.has(part));
 }
 
+/**
+ * Path confinement. A vault is a local directory and everything it indexes must
+ * come from inside it: a symlink pointing at /etc/passwd would otherwise be
+ * read, hashed, and summarised into the catalog. The comparison is made on real
+ * paths, so no amount of "..", nesting, or intermediate link defeats it.
+ */
+export function isInsideVault(vaultRealPath: string, realTarget: string): boolean {
+  const rel = relative(vaultRealPath, realTarget);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+export interface WalkResult {
+  files: string[];
+  /** Entries refused because they resolve outside the vault, path then target. */
+  escapedSymlinks: Array<{ path: string; target: string }>;
+}
+
 async function walkFiles(
   root: string,
   current: string,
   excluded: ReadonlySet<string>,
+  vaultRealPath: string,
+  result: WalkResult,
   visited: Set<string> = new Set(),
-): Promise<string[]> {
+): Promise<WalkResult> {
   // Cycle guard: resolve the directory to its real path and never descend into
   // the same real directory twice, so a symlink loop can never spin forever.
   let currentReal: string;
   try {
     currentReal = await realpath(current);
   } catch {
-    return [];
+    return result;
   }
   if (visited.has(currentReal)) {
-    return [];
+    return result;
   }
   visited.add(currentReal);
 
   const entries = await readdir(current, { withFileTypes: true });
-  const files: string[] = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const absolutePath = join(current, entry.name);
     const relativeFilePath = relativePath(root, absolutePath);
     if (hasExcludedPart(relativeFilePath, excluded)) {
       continue;
     }
+    if (relativeFilePath === LOCK_DIRECTORY_RELATIVE_PATH) {
+      continue;
+    }
     let entryIsDirectory = entry.isDirectory();
     let entryIsFile = entry.isFile();
     if (entry.isSymbolicLink()) {
-      // Follow the link (stat resolves it). Broken links are simply skipped.
+      let target: string;
       try {
-        const target = await stat(absolutePath);
-        entryIsDirectory = target.isDirectory();
-        entryIsFile = target.isFile();
+        target = await realpath(absolutePath);
+      } catch {
+        // Broken link: nothing to resolve, nothing to report.
+        continue;
+      }
+      if (!isInsideVault(vaultRealPath, target)) {
+        result.escapedSymlinks.push({ path: relativeFilePath, target });
+        continue;
+      }
+      try {
+        const resolved = await stat(absolutePath);
+        entryIsDirectory = resolved.isDirectory();
+        entryIsFile = resolved.isFile();
       } catch {
         continue;
       }
     }
     if (entryIsDirectory) {
-      files.push(...await walkFiles(root, absolutePath, excluded, visited));
+      await walkFiles(root, absolutePath, excluded, vaultRealPath, result, visited);
     } else if (entryIsFile) {
-      files.push(absolutePath);
+      result.files.push(absolutePath);
     }
   }
-  return files;
+  return result;
+}
+
+/**
+ * Lists every indexable file of a vault, refusing anything that resolves outside
+ * it. Returns the refusals alongside the files so the caller can report them
+ * instead of dropping them silently.
+ */
+export async function collectVaultFiles(
+  root: string,
+  excluded: ReadonlySet<string>,
+): Promise<WalkResult> {
+  const vaultRealPath = await realpath(root).catch(() => root);
+  return walkFiles(root, root, excluded, vaultRealPath, { files: [], escapedSymlinks: [] });
 }
 
 /**
@@ -296,7 +357,7 @@ export async function countChangedSince(
   const indexPrefix = toPosixPath(config.paths.index).replace(/\/$/u, "") + "/";
   const sinceMs = since.getTime();
   let changed = 0;
-  for (const absolutePath of await walkFiles(root, root, excluded)) {
+  for (const absolutePath of (await collectVaultFiles(root, excluded)).files) {
     const relativeFilePath = toPosixPath(relativePath(root, absolutePath));
     if (isGeneratedPath(relativeFilePath, config)) {
       continue;
@@ -422,7 +483,12 @@ export async function scanVault(
   const skipped: Record<string, number> = {};
   const records: CatalogRecord[] = [];
 
-  for (const absolutePath of await walkFiles(root, root, excluded)) {
+  const walk = await collectVaultFiles(root, excluded);
+  if (walk.escapedSymlinks.length > 0) {
+    skipped.symlink_outside_vault = walk.escapedSymlinks.length;
+  }
+
+  for (const absolutePath of walk.files) {
     const reason = await shouldSkip(root, absolutePath, config, maxFileBytes, excluded);
     if (reason) {
       skipped[reason] = (skipped[reason] ?? 0) + 1;
@@ -441,7 +507,10 @@ export async function scanVault(
   );
   const graph = buildGraph(records, config.root_label, now);
   const incoming = new Set(graph.edges.map((edge) => edge.target));
-  const gitTimes = options.gitTimes ?? await gitContentTimes(root);
+  const gitTimes = options.gitTimes ?? await gitContentTimes(
+    root,
+    options.gitTimeoutMs === undefined ? {} : { timeoutMs: options.gitTimeoutMs },
+  );
   const floorTimestamp = repoFloorTimestamp(gitTimes);
   const active = activePathsFromConfig(config);
 
@@ -495,4 +564,38 @@ export async function scanVault(
   };
 
   return { catalog, graph, freshness, delta };
+}
+
+export interface RunScanOptions extends ScanOptions, WriteIndexOptions {
+  lock?: LockOptions;
+}
+
+export interface RunScanResult extends WriteIndexResult {
+  scan: ScanResult;
+}
+
+/**
+ * The complete scan cycle under one lock: read the previous catalog, walk the
+ * vault, publish the new set.
+ *
+ * The lock covers the read as well as the write. Locking only the publication
+ * would still let a second process read the vault, wait, and then publish an
+ * index built from a state that no longer exists. Callers must use this entry
+ * point rather than composing scanVault and writeIndexArtifacts themselves,
+ * which would take the lock for the publication alone.
+ */
+export async function runVaultScan(
+  root: string,
+  config: VaultConfig,
+  options: RunScanOptions = {},
+): Promise<RunScanResult> {
+  return withLock(lockPathFor(root, SCAN_LOCK_NAME), async () => {
+    const previousRecords = options.previousRecords ?? await loadCatalog(root, config);
+    const scan = await scanVault(root, config, { ...options, previousRecords });
+    const write = await writeIndexArtifacts(root, config, scan, { ...options, locked: true });
+    return { ...write, scan };
+  }, {
+    holder: "open-brain scan",
+    ...(options.lock ?? {}),
+  });
 }

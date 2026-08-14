@@ -3,7 +3,6 @@ import { defineCommand, runCommand, runMain } from "citty";
 import { join, resolve } from "node:path";
 
 import { loadCatalog } from "../core/catalog.js";
-import { loadConfigResult } from "../core/config.js";
 import { ExpectedError } from "../core/errors.js";
 import {
   applyReviewedGcProposal,
@@ -15,30 +14,44 @@ import {
 import { buildGraph } from "../core/graph.js";
 import { checkVaultHealth } from "../core/health.js";
 import { ingestInbox } from "../core/ingest.js";
-import { writeIndexArtifacts } from "../core/index-writer.js";
 import { loadRouting, routeVault, suggestRoutes } from "../core/route.js";
-import { scanVault } from "../core/scan.js";
+import { runVaultScan } from "../core/scan.js";
 import { applySkin, type SkinName } from "../core/skin.js";
 import { getVaultStatus } from "../core/status.js";
-import type { VaultConfig } from "../core/types.js";
 import {
-  addPreference,
+  assertHumanPresence,
+  humanPresenceFromStdin,
+  UNATTENDED_DESCRIPTION,
+  UNATTENDED_FLAG,
+  UNATTENDED_WARNING,
+} from "../gate/presence.js";
+import {
   isLedgerDate,
   isPreferenceStatus,
   isPreferenceWeight,
   listPreferences,
   loadPreferenceLedger,
-  logPreference,
   PREFERENCE_CORE_RELATIVE_PATH,
   PREFERENCE_LEDGER_RELATIVE_PATH,
-  savePreferenceLedger,
-  shouldAutoRegen,
-  syncPreferenceMirrors,
+  regeneratePreferenceOutputs,
+  runPreferenceOperation,
   validatePreferenceLedger,
-  writePreferenceCore,
+  withPreferenceLock,
   type PreferenceStatus,
   type PreferenceWeight,
 } from "../prefs/index.js";
+import { capabilitiesCommand } from "./commands/capabilities.js";
+import { captureCommand } from "./commands/capture.js";
+import { classifyCommand } from "./commands/classify.js";
+import { guardCommand } from "./commands/guard.js";
+import { hookCommand } from "./commands/hook.js";
+import { hooksCommand } from "./commands/hooks.js";
+import { learnCommand } from "./commands/learn.js";
+import { onboardingCommand } from "./commands/onboarding.js";
+import { parityCommand } from "./commands/parity.js";
+import { stagingCommand } from "./commands/staging.js";
+import { syncCommand } from "./commands/sync.js";
+import { transcriptsCommand } from "./commands/transcripts.js";
 import {
   checkIdeaInVault,
   dismissIdeaInVault,
@@ -54,45 +67,18 @@ import {
   writeJsonFile,
 } from "./vault.js";
 import { syncLoadersFromConfig } from "../loaders/index.js";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function argument(args: unknown, name: string): unknown {
-  return isRecord(args) ? args[name] : undefined;
-}
-
-function optionalString(args: unknown, name: string): string | undefined {
-  const value = argument(args, name);
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function booleanArgument(args: unknown, name: string): boolean {
-  return argument(args, name) === true;
-}
-
-function requiredString(args: unknown, name: string): string {
-  const value = optionalString(args, name);
-  if (!value) {
-    throw new Error(`--${name} requires a non-empty value.`);
-  }
-  return value;
-}
-
-function optionalNonNegativeInteger(
-  args: unknown,
-  name: string,
-): number | undefined {
-  const value = optionalString(args, name);
-  if (value === undefined) {
-    return undefined;
-  }
-  if (!/^\d+$/u.test(value)) {
-    throw new Error(`--${name} must be a non-negative integer.`);
-  }
-  return Number(value);
-}
+import {
+  booleanArgument,
+  isRecord,
+  loadConfigForCli,
+  optionalBoolean,
+  optionalNonNegativeInteger,
+  optionalString,
+  printJson,
+  printNotice,
+  requiredString,
+  rootArgument,
+} from "./shared.js";
 
 function optionalPreferenceWeight(
   args: unknown,
@@ -142,36 +128,68 @@ function optionalLedgerDate(args: unknown, name: string): string | undefined {
   return value;
 }
 
-// Tri-state boolean: --core => true, --no-core => false, absent => undefined.
-function optionalBoolean(args: unknown, name: string): boolean | undefined {
-  const value = argument(args, name);
-  return typeof value === "boolean" ? value : undefined;
+function optionalDomainList(args: unknown, name: string): string[] | undefined {
+  const value = optionalString(args, name);
+  if (value === undefined) {
+    return undefined;
+  }
+  const domains = value.split(",").map((domain) => domain.trim()).filter((domain) => domain.length > 0);
+  if (domains.length === 0) {
+    throw new ExpectedError(`--${name} must list at least one non-empty domain.`);
+  }
+  return domains;
 }
+
+/**
+ * The second door into the preference kernel.
+ *
+ * `prefs add` and `prefs log` write it directly, on purpose: a preference the
+ * user states by typing the whole statement themselves is a human decision, and
+ * routing it through a staging batch would be ceremony, not safety. What is not
+ * acceptable is that this door asks for less than `sync validate` does, because
+ * the weaker door is the one that defines the real guarantee. Both now demand
+ * the same thing: a terminal on standard input, or the documented flag that
+ * says out loud it is writing with no human present.
+ *
+ * `prefs regen` uses the same check for a narrower reason: it republishes the
+ * always-on core and the loader mirrors every host CLI reads, from whatever
+ * the ledger currently holds. There is no new text and no batch behind it
+ * either, so a kernel write with nothing proving a human asked for it was
+ * exactly as unguarded here as it was on the other two.
+ *
+ * There is no confirmation token here and there does not need to be. The token
+ * proves that somebody read a text the machine wrote; here the text is typed in
+ * the same command by the person the presence check is about.
+ */
+function assertPreferenceWriteIsHuman(args: unknown, command: string): boolean {
+  const unattended = booleanArgument(args, UNATTENDED_FLAG);
+  assertHumanPresence(humanPresenceFromStdin(unattended), `\`open-brain ${command}\``);
+  return unattended;
+}
+
+const unattendedArgument = {
+  unattended: {
+    type: "boolean",
+    description: UNATTENDED_DESCRIPTION,
+    default: false,
+  },
+} as const;
+
+const operationIdArgument = {
+  "operation-id": {
+    type: "string",
+    description:
+      "Idempotency key. Replaying the same operation id with the same payload changes nothing and reports the replay.",
+    required: false,
+  },
+} as const;
 
 function requiredSkinName(args: unknown): SkinName {
   const skin = requiredString(args, "skin");
   if (skin !== "universal" && skin !== "brain") {
-    throw new Error("skin must be either universal or brain.");
+    throw new ExpectedError("skin must be either universal or brain.");
   }
   return skin;
-}
-
-function printJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-}
-
-function printNotice(message: string): void {
-  process.stdout.write(`${pc.cyan(message)}\n`);
-}
-
-// Loads config for a command and warns once on stderr when the config file
-// exists but is unreadable or malformed, without changing the exit code.
-async function loadConfigForCli(root: string): Promise<VaultConfig> {
-  const { config, issue } = await loadConfigResult(root);
-  if (issue) {
-    process.stderr.write(`${pc.yellow("WARNING")} ${issue.message}\n`);
-  }
-  return config;
 }
 
 function isGcCandidate(value: unknown): boolean {
@@ -215,17 +233,10 @@ function isGcProposal(value: unknown): value is GcProposal {
 async function readGcProposal(path: string): Promise<GcProposal> {
   const value = await readJsonFile(path);
   if (!isGcProposal(value)) {
-    throw new Error("GC proposal does not match the expected OpenBrain format.");
+    throw new ExpectedError("GC proposal does not match the expected OpenBrain format.");
   }
   return value;
 }
-
-const rootArgument = {
-  root: {
-    type: "string",
-    description: "Vault root or a path inside an existing vault.",
-  },
-} as const;
 
 const initCommand = defineCommand({
   meta: {
@@ -297,6 +308,30 @@ const doctorCommand = defineCommand({
       printNotice("Run `open-brain doctor --repair` to repair only safe generated wiring.");
       process.exitCode = 2;
     }
+    if (result.redline.tampered) {
+      printNotice(
+        "The preference kernel changed outside its recorded write paths. Review `redline` in this report before trusting it.",
+      );
+      process.exitCode = 2;
+    }
+    if (result.redline.unverified) {
+      // Not a failure, and not a clean line either: this says the report cannot
+      // vouch for a file that is there, which is a different thing from saying
+      // it checked it and found it whole.
+      printNotice(
+        "Part of the preference kernel is not covered by any recorded write, so `redline` in this report cannot say whether it was reviewed. It is not evidence of tampering, and it is not a clean bill of health either.",
+      );
+    }
+    for (const issue of result.capabilityIssues) {
+      printNotice(issue);
+      process.exitCode = 2;
+    }
+    if (result.preferenceKernelAliases.length > 0) {
+      printNotice(
+        `${String(result.preferenceKernelAliases.length)} symlink(s) resolve to a protected preference kernel file: ${result.preferenceKernelAliases.join(", ")}. A write through one of them would not be seen as a kernel write.`,
+      );
+      process.exitCode = 2;
+    }
   },
 });
 
@@ -309,10 +344,8 @@ const scanCommand = defineCommand({
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const config = await loadConfigForCli(root);
-    const previousRecords = await loadCatalog(root, config);
-    const scan = await scanVault(root, config, { previousRecords });
-    await writeIndexArtifacts(root, config, scan);
-    printJson(scan);
+    const written = await runVaultScan(root, config);
+    printJson(written.scan);
   },
 });
 
@@ -449,13 +482,16 @@ const gcCommand = defineCommand({
 const healthCommand = defineCommand({
   meta: {
     name: "health",
-    description: "Check vault structure, freshness, and index integrity.",
+    description: "Check vault structure, freshness, index integrity, and the reading path.",
   },
   args: rootArgument,
   async run({ args }) {
     const root = await resolveVaultRoot(optionalString(args, "root"));
     const config = await loadConfigForCli(root);
-    const report = await checkVaultHealth(root, config);
+    // `health` is asked for on purpose, so it can afford to read every index
+    // and say whether documents can actually be arrived at. `status` runs on
+    // every session start and leaves that audit alone.
+    const report = await checkVaultHealth(root, config, { reachability: true });
     printJson(report);
     if (!report.healthy) {
       process.exitCode = 2;
@@ -554,6 +590,16 @@ const prefsCommand = defineCommand({
         }
       },
     }),
+    /**
+     * The direct door records what justified the preference, exactly like the
+     * gated one. `staging add` has always demanded a quote, and every batch that
+     * reaches the kernel through `sync validate` carries the proofs its
+     * candidates were staged with; only this door used to accept a preference
+     * that governs every turn with nothing behind it. A preference with no
+     * citation is not a preference, it is a guess that outranks one. Domains,
+     * why, and apply are optional here for the opposite reason: the library
+     * already derives honest defaults for them, and a default is not a claim.
+     */
     add: defineCommand({
       meta: {
         name: "add",
@@ -564,34 +610,59 @@ const prefsCommand = defineCommand({
         id: { type: "string", description: "Kebab-case preference identifier.", required: true },
         text: { type: "string", description: "Preference statement text.", required: true },
         weight: { type: "string", description: "Importance from 1 through 5.", required: true },
+        quote: { type: "string", description: "What was actually said, kept as the first evidence event.", required: true },
+        domains: { type: "string", description: "Comma-separated contexts the preference applies to. Defaults to general.", required: false },
+        why: { type: "string", description: "Why the preference exists. Defaults to the statement.", required: false },
+        apply: { type: "string", description: "How to carry it out. Defaults to the statement.", required: false },
+        source: { type: "string", description: "Where the preference came from.", required: false },
         status: { type: "string", description: "Optional status (law, active, proposed, probation, retired).", required: false },
         date: { type: "string", description: "Optional ISO date (YYYY-MM-DD). Defaults to today.", required: false },
         core: { type: "boolean", description: "Force core membership regardless of weight.", required: false },
+        ...operationIdArgument,
+        ...unattendedArgument,
       },
       async run({ args }) {
+        const unattended = assertPreferenceWriteIsHuman(args, "prefs add");
         const root = await resolveVaultRoot(optionalString(args, "root"));
-        const ledger = await loadPreferenceLedger(root);
         const status = optionalPreferenceStatus(args, "status");
         const date = optionalLedgerDate(args, "date");
         const core = optionalBoolean(args, "core");
+        const operationId = optionalString(args, "operation-id");
         const id = requiredString(args, "id");
-        const next = addPreference(ledger, {
-          id,
-          text: requiredString(args, "text"),
-          weight: requiredPreferenceWeight(args, "weight"),
-          ...(status === undefined ? {} : { status }),
-          ...(date === undefined ? {} : { date }),
-          ...(core === undefined ? {} : { core }),
-        });
-        await savePreferenceLedger(root, next);
-        const preference = next.preferences.find((item) => item.id === id);
-        let regenerated = false;
-        if (preference && shouldAutoRegen(preference)) {
-          await writePreferenceCore(root, next);
-          await syncPreferenceMirrors(root, next);
-          regenerated = true;
+        const domains = optionalDomainList(args, "domains");
+        const why = optionalString(args, "why");
+        const apply = optionalString(args, "apply");
+        const source = optionalString(args, "source");
+        const result = await runPreferenceOperation(
+          root,
+          {
+            kind: "add",
+            id,
+            text: requiredString(args, "text"),
+            weight: requiredPreferenceWeight(args, "weight"),
+            quote: requiredString(args, "quote"),
+            ...(domains === undefined ? {} : { domains }),
+            ...(why === undefined ? {} : { why }),
+            ...(apply === undefined ? {} : { apply }),
+            ...(source === undefined ? {} : { source }),
+            ...(status === undefined ? {} : { status }),
+            ...(date === undefined ? {} : { date }),
+            ...(core === undefined ? {} : { core }),
+            ...(operationId === undefined ? {} : { operationId }),
+          },
+          { command: "prefs add" },
+        );
+        if (result.outcome.kind === "conflict") {
+          throw new ExpectedError(result.outcome.detail);
         }
-        printJson({ preference, regenerated });
+        printJson({
+          preference: result.preference,
+          regenerated: result.regenerated,
+          replayed: result.outcome.kind === "replayed",
+        });
+        if (unattended) {
+          process.stderr.write(`${UNATTENDED_WARNING}\n`);
+        }
       },
     }),
     list: defineCommand({
@@ -644,16 +715,25 @@ const prefsCommand = defineCommand({
         name: "regen",
         description: "Regenerate the preference core and portable loader mirrors.",
       },
-      args: rootArgument,
+      args: { ...rootArgument, ...unattendedArgument },
       async run({ args }) {
+        // Regenerating the core rewrites what every host CLI reads as the
+        // always-on preference set. That is a kernel write like `prefs add`
+        // and `prefs log`, and it went through this door with nothing behind
+        // it: the same presence contract applies here now.
+        const unattended = assertPreferenceWriteIsHuman(args, "prefs regen");
         const root = await resolveVaultRoot(optionalString(args, "root"));
-        const ledger = await loadPreferenceLedger(root);
-        await writePreferenceCore(root, ledger);
-        const mirrors = await syncPreferenceMirrors(root, ledger);
+        const mirrors = await withPreferenceLock(root, async () => {
+          const ledger = await loadPreferenceLedger(root);
+          return regeneratePreferenceOutputs(root, ledger, { command: "prefs regen" });
+        });
         printJson({
           core_path: PREFERENCE_CORE_RELATIVE_PATH,
           loader_mirrors: mirrors,
         });
+        if (unattended) {
+          process.stderr.write(`${UNATTENDED_WARNING}\n`);
+        }
       },
     }),
     log: defineCommand({
@@ -693,32 +773,44 @@ const prefsCommand = defineCommand({
           description: "Optional supporting quote.",
           required: false,
         },
+        ...operationIdArgument,
+        ...unattendedArgument,
       },
       async run({ args }) {
+        const unattended = assertPreferenceWriteIsHuman(args, "prefs log");
         const root = await resolveVaultRoot(optionalString(args, "root"));
-        const ledger = await loadPreferenceLedger(root);
         const id = requiredString(args, "id");
         const signal = requiredString(args, "signal");
         const weight = optionalPreferenceWeight(args, "weight");
         const status = optionalPreferenceStatus(args, "status");
         const date = optionalLedgerDate(args, "date");
         const quote = optionalString(args, "quote");
-        const next = logPreference(ledger, id, {
-          signal,
-          ...(weight === undefined ? {} : { weight }),
-          ...(status === undefined ? {} : { status }),
-          ...(date === undefined ? {} : { date }),
-          ...(quote === undefined ? {} : { quote }),
-        });
-        await savePreferenceLedger(root, next);
-        const preference = next.preferences.find((item) => item.id === id);
-        let regenerated = false;
-        if (preference && shouldAutoRegen(preference)) {
-          await writePreferenceCore(root, next);
-          await syncPreferenceMirrors(root, next);
-          regenerated = true;
+        const operationId = optionalString(args, "operation-id");
+        const result = await runPreferenceOperation(
+          root,
+          {
+            kind: "log",
+            id,
+            signal,
+            ...(weight === undefined ? {} : { weight }),
+            ...(status === undefined ? {} : { status }),
+            ...(date === undefined ? {} : { date }),
+            ...(quote === undefined ? {} : { quote }),
+            ...(operationId === undefined ? {} : { operationId }),
+          },
+          { command: "prefs log" },
+        );
+        if (result.outcome.kind === "conflict") {
+          throw new ExpectedError(result.outcome.detail);
         }
-        printJson({ preference, regenerated });
+        printJson({
+          preference: result.preference,
+          regenerated: result.regenerated,
+          replayed: result.outcome.kind === "replayed",
+        });
+        if (unattended) {
+          process.stderr.write(`${UNATTENDED_WARNING}\n`);
+        }
       },
     }),
   },
@@ -753,9 +845,7 @@ const skinCommand = defineCommand({
     let rescanned = false;
     if (!dryRun && result.rescan_required) {
       const updatedConfig = await loadConfigForCli(root);
-      const previousRecords = await loadCatalog(root, updatedConfig);
-      const scan = await scanVault(root, updatedConfig, { previousRecords });
-      await writeIndexArtifacts(root, updatedConfig, scan);
+      await runVaultScan(root, updatedConfig);
       rescanned = true;
     }
 
@@ -878,6 +968,18 @@ const main = defineCommand({
     ingest: ingestCommand,
     prefs: prefsCommand,
     skin: skinCommand,
+    hook: hookCommand,
+    hooks: hooksCommand,
+    staging: stagingCommand,
+    guard: guardCommand,
+    sync: syncCommand,
+    classify: classifyCommand,
+    transcripts: transcriptsCommand,
+    capture: captureCommand,
+    onboarding: onboardingCommand,
+    capabilities: capabilitiesCommand,
+    learn: learnCommand,
+    parity: parityCommand,
   },
 });
 
@@ -909,9 +1011,15 @@ function printExpectedError(message: string): void {
 // keep their stack.
 async function runCli(rawArgs: string[]): Promise<void> {
   const wantsHelp = rawArgs.includes("--help") || rawArgs.includes("-h");
-  const wantsVersion = rawArgs.length === 1 && rawArgs[0] === "--version";
-  if (wantsHelp || wantsVersion) {
+  if (wantsHelp) {
     await runMain(main, { rawArgs });
+    return;
+  }
+  // --version answers the same question wherever it appears, at the top level
+  // or on any subcommand, so it is handled once here rather than left to
+  // citty, which only recognizes it on the command actually being run.
+  if (rawArgs.includes("--version")) {
+    process.stdout.write(`${ENGINE_VERSION}\n`);
     return;
   }
   try {

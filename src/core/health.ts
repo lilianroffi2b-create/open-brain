@@ -1,13 +1,18 @@
 import { access, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
+import { PREFERENCE_LEDGER_RELATIVE_PATH } from "../prefs/io.js";
+import { validatePreferenceLedger } from "../prefs/validation.js";
 import { catalogEnvelopeFromValue, readJson } from "./catalog.js";
 import { loadConfigResult } from "./config.js";
 import { canonicalJson } from "./index-writer.js";
+import { auditReachability } from "./reachability.js";
+import { loadRouting } from "./route.js";
 import { countChangedSince } from "./scan.js";
 import { sha256 } from "./text.js";
 import type {
   CatalogIndexEnvelope,
+  CatalogRecord,
   FreshnessEnvelope,
   VaultConfig,
 } from "./types.js";
@@ -31,6 +36,13 @@ export interface VaultHealthReport {
 export interface HealthOptions {
   now?: Date;
   maxFreshnessAgeMs?: number;
+  /**
+   * Audit the reading path as well: indexes, the links they make, and the
+   * layers routes can reach. It reads every `_index.md` in the vault, so it is
+   * off unless asked for; `health` asks for it, `status` does not, because
+   * `status` runs on every session start.
+   */
+  reachability?: boolean;
 }
 
 const DEFAULT_MAX_FRESHNESS_AGE_MS = 24 * 60 * 60 * 1000;
@@ -169,6 +181,114 @@ async function checkShardIntegrity(
   return checks;
 }
 
+/**
+ * Checks that the preference kernel is a well-formed Hermes ledger. `health`
+ * is the command whose name promises the vault is sound, so it has to look at
+ * the kernel too: a corrupt registry that `health` calls healthy is a false
+ * promise, even though `doctor` and `prefs validate` already catch it.
+ */
+async function checkPreferenceKernel(root: string): Promise<HealthCheck> {
+  const path = join(root, PREFERENCE_LEDGER_RELATIVE_PATH);
+  const raw = await readJson(path);
+  if (raw === undefined) {
+    return {
+      name: "preferences",
+      severity: "error",
+      detail: "Preference ledger is missing or is not valid JSON. Run open-brain prefs validate for detail.",
+    };
+  }
+  const result = validatePreferenceLedger(raw);
+  if (!result.valid) {
+    return {
+      name: "preferences",
+      severity: "error",
+      detail: `Preference ledger is invalid: ${result.errors.join(" ")}`,
+    };
+  }
+  return {
+    name: "preferences",
+    severity: "ok",
+    detail: "Preference ledger is well formed.",
+  };
+}
+
+function sample(values: readonly string[], limit = 3): string {
+  const shown = values.slice(0, limit).join(", ");
+  return values.length > limit
+    ? `${shown}, and ${String(values.length - limit)} more`
+    : shown;
+}
+
+/**
+ * Checks that documents can be arrived at, not just that they were indexed.
+ *
+ * These are warnings and never errors. An unreachable folder is a defect in
+ * what the vault says about itself, not in the artifacts this command
+ * validates, and a vault whose author has not written an index yet is not
+ * broken. Raising them to errors would make `healthy` mean something it does
+ * not mean, and every consumer of that flag would inherit the confusion.
+ */
+async function checkReachability(
+  root: string,
+  config: VaultConfig,
+  records: CatalogRecord[],
+): Promise<HealthCheck[]> {
+  const routing = await loadRouting(root, config);
+  const report = await auditReachability(root, config, records, routing);
+  const checks: HealthCheck[] = [];
+
+  checks.push(
+    report.folders_without_index.length > 0
+      ? {
+        name: "reach:index",
+        severity: "warning",
+        detail: `${String(report.folders_without_index.length)} folder(s) hold documents with no _index.md: ${sample(report.folders_without_index)}.`,
+      }
+      : {
+        name: "reach:index",
+        severity: "ok",
+        detail: `${String(report.folders_with_index)} folder(s) carry an index.`,
+      },
+  );
+
+  checks.push(
+    report.dead_index_links.length > 0
+      ? {
+        name: "reach:links",
+        severity: "warning",
+        detail: `${String(report.dead_index_links.length)} index link(s) resolve to nothing: ${sample(report.dead_index_links.map((link) => `${link.index} -> ${link.target}`))}.`,
+      }
+      : { name: "reach:links", severity: "ok", detail: "Every index link resolves." },
+  );
+
+  checks.push(
+    report.orphan_folders.length > 0
+      ? {
+        name: "reach:orphans",
+        severity: "warning",
+        detail: `${String(report.orphan_folders.length)} indexed folder(s) their parent index never mentions: ${sample(report.orphan_folders)}.`,
+      }
+      : { name: "reach:orphans", severity: "ok", detail: "Every indexed folder is mentioned by its parent." },
+  );
+
+  const coverage = `default reaches ${String(report.default_route_layers.length)}/${String(report.layers.length)} layer(s)`;
+  checks.push(
+    report.unrouted_layers.length > 0
+      ? {
+        name: "reach:routes",
+        severity: "warning",
+        detail: `${String(report.unrouted_layers.length)} layer(s) no route reaches: ${sample(report.unrouted_layers)}. ${coverage}.`,
+      }
+      : {
+        name: "reach:routes",
+        severity: "ok",
+        detail: `Every layer is reachable by a route; ${coverage}.`,
+      },
+  );
+
+  return checks;
+}
+
 /** Checks vault structure, index freshness, and sharded catalog integrity. */
 export async function checkVaultHealth(
   root: string,
@@ -198,6 +318,8 @@ export async function checkVaultHealth(
         : "Missing canonical directory.",
     });
   }
+
+  checks.push(await checkPreferenceKernel(root));
 
   const catalogPath = join(root, config.paths.catalog);
   const freshnessPath = join(root, config.paths.freshness);
@@ -268,6 +390,10 @@ export async function checkVaultHealth(
           : "Sharding is disabled.",
       });
     }
+  }
+
+  if (options.reachability && catalog) {
+    checks.push(...await checkReachability(root, config, catalog.records));
   }
 
   return {

@@ -64,7 +64,12 @@ test("prefs add wires auto-regen through the CLI", async (t) => {
     "--id", "cli-smoke-pref",
     "--text", "Always confirm before deleting.",
     "--weight", "5",
+    "--quote", "Never delete anything without asking me first.",
     "--status", "law",
+    // A test spawns a child process, so standard input is a pipe and the
+    // preference kernel refuses the write unless the waiver is explicit.
+    // gate-human-presence.test.ts is where that refusal is asserted.
+    "--unattended",
   ]);
   assert.equal(add.exitCode, 0, add.stderr);
   const addResult = JSON.parse(add.stdout) as {
@@ -83,8 +88,61 @@ test("prefs add wires auto-regen through the CLI", async (t) => {
     "--id", "cli-smoke-pref",
     "--text", "duplicate",
     "--weight", "1",
+    "--quote", "Same rule, said twice.",
+    "--unattended",
   ]);
   assert.notEqual(duplicate.exitCode, 0, `duplicate add should fail; stderr: ${duplicate.stderr}`);
+});
+
+test("prefs add refuses a preference with nothing behind it, and keeps what justified it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "open-brain-cli-prefs-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const init = await runCli(["init", root, "--no-git"]);
+  assert.equal(init.exitCode, 0, init.stderr);
+
+  const uncited = await runCli([
+    "prefs", "add",
+    "--root", root,
+    "--id", "uncited-law",
+    "--text", "Always answer in French.",
+    "--weight", "5",
+    "--unattended",
+  ]);
+  assert.notEqual(uncited.exitCode, 0, uncited.stdout);
+  assert.match(uncited.stderr, /quote/u);
+
+  const added = await runCli([
+    "prefs", "add",
+    "--root", root,
+    "--id", "cited-law",
+    "--text", "Always answer in French.",
+    "--weight", "5",
+    "--quote", "Reponds-moi toujours en francais.",
+    "--domains", "writing, email",
+    "--why", "He reads faster in his own language.",
+    "--apply", "Write every answer in French unless asked otherwise.",
+    "--source", "stated in session",
+    "--unattended",
+  ]);
+  assert.equal(added.exitCode, 0, added.stderr);
+
+  const result = JSON.parse(added.stdout) as {
+    preference: {
+      status: string;
+      domains: string[];
+      why: string;
+      apply: string;
+      source: string;
+      evidence: Array<{ quote?: string }>;
+    };
+  };
+  assert.equal(result.preference.status, "law");
+  assert.deepEqual(result.preference.domains, ["writing", "email"]);
+  assert.equal(result.preference.why, "He reads faster in his own language.");
+  assert.equal(result.preference.apply, "Write every answer in French unless asked otherwise.");
+  assert.equal(result.preference.source, "stated in session");
+  assert.equal(result.preference.evidence[0]?.quote, "Reponds-moi toujours en francais.");
 });
 
 test("prefs add below core threshold does not regenerate the core", async (t) => {
@@ -99,6 +157,8 @@ test("prefs add below core threshold does not regenerate the core", async (t) =>
     "--id", "cli-low-weight-pref",
     "--text", "Minor stylistic nudge.",
     "--weight", "2",
+    "--quote", "Maybe keep the headings shorter.",
+    "--unattended",
   ]);
   assert.equal(add.exitCode, 0, add.stderr);
   const addResult = JSON.parse(add.stdout) as { regenerated: boolean };

@@ -20,6 +20,7 @@ import { writeIndexArtifacts } from "../src/core/index-writer.js";
 import { scanVault } from "../src/core/scan.js";
 import { getVaultStatus } from "../src/core/status.js";
 import type { CatalogRecord, VaultConfig } from "../src/core/types.js";
+import { PREFERENCE_LEDGER_RELATIVE_PATH } from "../src/prefs/io.js";
 
 function createConfig(rootLabel = "TestVault"): VaultConfig {
   const config = structuredClone(DEFAULT_CONFIG);
@@ -41,6 +42,17 @@ async function createVault(config: VaultConfig): Promise<string> {
       mkdir(join(root, directory), { recursive: true }),
     ),
   );
+  // A real vault always ships a well-formed preference ledger from `init`;
+  // seed one here too, so `checkVaultHealth`'s kernel check does not flag
+  // this synthetic vault as unhealthy for a reason unrelated to what each
+  // test below actually exercises. Pinned to a date well before every fixed
+  // clock used in this file, so it never counts as a change since the last
+  // scan and perturbs the freshness assertions below.
+  const ledgerPath = join(root, PREFERENCE_LEDGER_RELATIVE_PATH);
+  await mkdir(join(ledgerPath, ".."), { recursive: true });
+  await writeFile(ledgerPath, JSON.stringify({ schema_version: 3, preferences: [] }), "utf8");
+  const seededAt = new Date("2020-01-01T00:00:00.000Z");
+  await utimes(ledgerPath, seededAt, seededAt);
   return root;
 }
 

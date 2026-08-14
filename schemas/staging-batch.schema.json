@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/staging-batch.schema.json",
+  "title": "OpenBrain Sync Batch",
+  "description": "The three files a review writes under 10_memory/staging/batches/. The batch and the decision are immutable once written; only the state file moves, and it carries its own hash so tampering is detected on every load.",
+  "oneOf": [
+    { "$ref": "#/$defs/batch" },
+    { "$ref": "#/$defs/state" },
+    { "$ref": "#/$defs/decision" }
+  ],
+  "$defs": {
+    "batch": {
+      "title": "Immutable batch",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "candidate_ids",
+        "selection_id",
+        "items",
+        "batch_id",
+        "content_hash"
+      ],
+      "properties": {
+        "schema": { "const": "open-brain/sync-batch/v1" },
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "candidate_ids": {
+          "type": "array",
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^cand-[0-9]{8}-[0-9a-f]{16}$" },
+          "description": "Sorted union of every merged_ids of the items."
+        },
+        "selection_id": {
+          "type": "string",
+          "pattern": "^selection-[0-9a-f]{24}$",
+          "description": "Identity of the slice the batch was built from, so a deposit that arrives during classification does not invalidate it."
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/item" }
+        },
+        "batch_id": { "type": "string", "pattern": "^batch-[0-9a-f]{24}$" },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "sha256 of the canonical JSON of this object without batch_id, content_hash and prepared_at. Re-checked on every load."
+        },
+        "prepared_at": {
+          "type": ["string", "null"],
+          "description": "When the batch was built. Outside the signature, so it never changes the identity of a batch, and absent on a batch written before the stamp existed. sync pending and sync show turn it into an age and a staleness verdict."
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "type",
+        "target",
+        "merged_ids",
+        "reason",
+        "proofs",
+        "weak",
+        "recommendation",
+        "evidence_basis",
+        "write",
+        "operation_id"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based, and the identity a human approves."
+        },
+        "type": { "type": "string", "enum": ["preference", "memory", "weight"] },
+        "target": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "merged_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^cand-[0-9]{8}-[0-9a-f]{16}$" },
+          "description": "No candidate identifier may appear in two items."
+        },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 5000 },
+        "proofs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["date", "quote"],
+            "properties": {
+              "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+              "quote": { "type": "string", "minLength": 1, "maxLength": 5000 }
+            }
+          }
+        },
+        "weak": { "type": "boolean" },
+        "recommendation": { "type": "string", "enum": ["approve", "reject_only"] },
+        "evidence_basis": {
+          "type": ["string", "null"],
+          "enum": ["recurrence", "documented_pain", "insufficient", null]
+        },
+        "write": { "$ref": "#/$defs/write" },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^sync-[0-9a-f]{32}$",
+          "description": "Derived from the item and its position, which is what makes an application idempotent."
+        }
+      }
+    },
+    "write": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "args", "precondition"],
+          "properties": {
+            "kind": { "const": "preference" },
+            "args": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "statement", "weight", "domains", "source", "quote", "date"],
+              "properties": {
+                "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+                "statement": { "type": "string", "minLength": 1 },
+                "weight": { "type": "integer", "minimum": 1, "maximum": 5 },
+                "domains": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" }
+                },
+                "why": { "type": "string" },
+                "apply": { "type": "string" },
+                "source": { "type": "string" },
+                "quote": { "type": "string" },
+                "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+              }
+            },
+            "precondition": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["preference"],
+              "properties": { "preference": { "const": "absent" } }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "mode", "args", "content", "precondition"],
+          "properties": {
+            "kind": { "const": "weight" },
+            "mode": { "type": "string", "enum": ["bump", "evidence"] },
+            "args": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "date", "weight", "signal", "quote"],
+              "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+                "weight": { "type": "integer", "minimum": 1, "maximum": 5 },
+                "signal": {
+                  "type": "string",
+                  "enum": ["validated_sync", "validated_sync_evidence"]
+                },
+                "quote": { "type": "string" },
+                "status": { "type": ["string", "null"] },
+                "regen": { "type": "boolean" }
+              }
+            },
+            "content": { "type": "string" },
+            "precondition": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["expected_current_weight"],
+              "properties": {
+                "expected_current_weight": { "type": "integer", "minimum": 1, "maximum": 5 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "target", "content", "content_sha256", "precondition"],
+          "properties": {
+            "kind": { "const": "memory" },
+            "target": { "type": "string", "minLength": 1 },
+            "content": { "type": "string", "minLength": 1 },
+            "content_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "diff": { "type": "string" },
+            "precondition": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["expected_sha256"],
+              "properties": {
+                "expected_sha256": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9a-f]{64}|absent)$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "content", "reason", "precondition"],
+          "properties": {
+            "kind": { "const": "reject_only" },
+            "content": { "type": "string" },
+            "reason": { "const": "insufficient_evidence" },
+            "proposal_weight": { "type": ["integer", "null"], "minimum": 1, "maximum": 5 },
+            "precondition": { "type": "object", "additionalProperties": false }
+          }
+        }
+      ]
+    },
+    "state": {
+      "title": "Mutable batch state",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "batch_id",
+        "phase",
+        "decision",
+        "operations",
+        "scan_done",
+        "compacted",
+        "state_hash"
+      ],
+      "properties": {
+        "schema": { "const": "open-brain/sync-state/v1" },
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "batch_id": { "type": "string", "pattern": "^batch-[0-9a-f]{24}$" },
+        "phase": {
+          "type": "string",
+          "enum": ["proposed", "decided", "applying", "apply_failed", "complete"]
+        },
+        "decision": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/decisionRecord" }]
+        },
+        "operations": {
+          "type": "object",
+          "description": "Keys are exactly the operation identifiers of the batch, no more and no fewer.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "attempts", "ref", "error"],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["pending", "applying", "applied", "apply_failed"]
+              },
+              "attempts": { "type": "integer", "minimum": 0 },
+              "ref": { "type": ["string", "null"] },
+              "error": { "type": ["string", "null"], "maxLength": 1000 }
+            }
+          }
+        },
+        "scan_done": { "type": "boolean" },
+        "compacted": { "type": "boolean" },
+        "state_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "sha256 of the canonical JSON of this object without state_hash. A divergence is refused, not repaired."
+        }
+      }
+    },
+    "decision": {
+      "title": "Frozen human decision",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "batch_id", "decision"],
+      "properties": {
+        "schema": { "const": "open-brain/sync-decision/v1" },
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "batch_id": { "type": "string", "pattern": "^batch-[0-9a-f]{24}$" },
+        "decision": { "$ref": "#/$defs/decisionRecord" }
+      }
+    },
+    "decisionRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approved_indices", "rejected_indices", "hash"],
+      "properties": {
+        "approved_indices": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "rejected_indices": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

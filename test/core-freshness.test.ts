@@ -9,6 +9,13 @@ import { writeIndexArtifacts } from "../src/core/index-writer.js";
 import { countChangedSince, scanVault } from "../src/core/scan.js";
 import { getVaultStatus } from "../src/core/status.js";
 import type { VaultConfig } from "../src/core/types.js";
+import { PREFERENCE_LEDGER_RELATIVE_PATH } from "../src/prefs/io.js";
+
+async function seedPreferenceLedger(root: string): Promise<void> {
+  const path = join(root, PREFERENCE_LEDGER_RELATIVE_PATH);
+  await mkdir(join(path, ".."), { recursive: true });
+  await writeFile(path, JSON.stringify({ schema_version: 3, preferences: [] }), "utf8");
+}
 
 function config(overrides: Partial<VaultConfig> = {}): VaultConfig {
   return { ...structuredClone(DEFAULT_CONFIG), root_label: "FreshVault", ...overrides };
@@ -75,6 +82,7 @@ test("status --auto rescans when the change signal fires with no other staleness
   const root = await mkdtemp(join(tmpdir(), "open-brain-auto-"));
   t.after(async () => rm(root, { recursive: true, force: true }));
   await Promise.all(vault.canonical_dirs.map((dir) => mkdir(join(root, dir), { recursive: true })));
+  await seedPreferenceLedger(root);
 
   const notePath = join(root, "10_memory", "note.md");
   await writeFile(notePath, "---\nlifecycle: working\n---\n# Note\n", "utf8");

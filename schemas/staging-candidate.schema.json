@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/staging-candidate.schema.json",
+  "title": "OpenBrain Staging Candidate",
+  "description": "One line of 10_memory/staging/candidates.jsonl. The staging area is the only free write zone in the vault: candidates land here without validation and nothing leaves without an explicit human decision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "ts",
+    "harness",
+    "source",
+    "signal",
+    "raw_quote",
+    "raw_markers",
+    "deposit_request",
+    "status",
+    "last_transition_ts",
+    "status_history"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Version of this artifact. Readers accept lower versions and default anything missing."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^cand-[0-9]{8}-[0-9a-f]{16}$",
+      "description": "Unique in the active file and in every monthly archive."
+    },
+    "ts": { "$ref": "#/$defs/timestamp" },
+    "session_id": { "$ref": "#/$defs/nullableString" },
+    "turn_id": { "$ref": "#/$defs/nullableString" },
+    "event_id": { "$ref": "#/$defs/nullableString" },
+    "harness": { "$ref": "#/$defs/harness" },
+    "source": { "$ref": "#/$defs/source" },
+    "signal": { "$ref": "#/$defs/signal" },
+    "raw_quote": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "description": "The user's own words, stored verbatim and never redacted. Delete one with `open-brain staging drop`."
+    },
+    "raw_markers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 32
+    },
+    "context": {
+      "type": ["string", "null"],
+      "maxLength": 280
+    },
+    "operation_id": { "$ref": "#/$defs/nullableString" },
+    "batch_id": { "$ref": "#/$defs/nullableString" },
+    "deposit_operation_id": {
+      "type": ["string", "null"],
+      "description": "Idempotency key of the deposit. Replaying it returns the same candidate and writes nothing."
+    },
+    "deposit_request": {
+      "$ref": "#/$defs/depositRequest",
+      "description": "Frozen copy of the normalized request, the reference used to detect a replay."
+    },
+    "deposit_batch_operation_id": { "$ref": "#/$defs/nullableString" },
+    "deposit_batch_digest": { "$ref": "#/$defs/nullableSha256" },
+    "deposit_batch_index": { "type": ["integer", "null"], "minimum": 0 },
+    "deposit_batch_size": { "type": ["integer", "null"], "minimum": 1 },
+    "status": { "$ref": "#/$defs/status" },
+    "type": {
+      "type": ["string", "null"],
+      "enum": ["preference", "memory", "weight", null]
+    },
+    "target": { "type": ["string", "null"], "maxLength": 240 },
+    "content": { "type": ["string", "null"] },
+    "proposed_weight": { "type": ["integer", "null"], "minimum": 1, "maximum": 5 },
+    "reason": { "type": ["string", "null"], "maxLength": 5000 },
+    "proofs": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/proof" }
+    },
+    "weak": { "type": ["boolean", "null"] },
+    "recommendation": {
+      "type": ["string", "null"],
+      "enum": ["approve", "reject_only", null]
+    },
+    "evidence_basis": {
+      "type": ["string", "null"],
+      "enum": ["recurrence", "documented_pain", "insufficient", null]
+    },
+    "gate_item_index": { "type": ["integer", "null"], "minimum": 1 },
+    "gate_write_payload": { "type": ["object", "null"] },
+    "apply_error": { "type": ["string", "null"], "maxLength": 1000 },
+    "proposed_ts": { "$ref": "#/$defs/nullableTimestamp" },
+    "decided_ts": { "$ref": "#/$defs/nullableTimestamp" },
+    "apply_started_ts": { "$ref": "#/$defs/nullableTimestamp" },
+    "resolved_ts": { "$ref": "#/$defs/nullableTimestamp" },
+    "applied_ref": { "$ref": "#/$defs/nullableString" },
+    "last_transition_ts": { "$ref": "#/$defs/timestamp" },
+    "status_history": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Append-only. Every transition leaves one entry, which is also what makes a replay detectable.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "ts"],
+        "properties": {
+          "status": { "$ref": "#/$defs/status" },
+          "ts": { "$ref": "#/$defs/timestamp" },
+          "operation_id": { "$ref": "#/$defs/nullableString" },
+          "batch_id": { "$ref": "#/$defs/nullableString" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "nullableTimestamp": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "nullableString": { "type": ["string", "null"], "minLength": 1 },
+    "nullableSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "harness": { "type": "string", "enum": ["claude-code", "codex", "unknown"] },
+    "source": {
+      "type": "string",
+      "enum": ["turn_end", "prompt_submit", "pre_compact", "manual"],
+      "description": "manual is the only source that does not require the capture capability: that one is the user speaking."
+    },
+    "signal": {
+      "type": "string",
+      "enum": ["explicit_request", "correction", "praise", "praise_weak"]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "staged",
+        "proposed",
+        "approved",
+        "rejected",
+        "applying",
+        "applied",
+        "apply_failed"
+      ]
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "quote"],
+      "properties": {
+        "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "quote": { "type": "string", "minLength": 1, "maxLength": 5000 }
+      }
+    },
+    "depositRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "signal", "raw_quote", "raw_markers", "harness"],
+      "properties": {
+        "source": { "$ref": "#/$defs/source" },
+        "signal": { "$ref": "#/$defs/signal" },
+        "raw_quote": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "raw_markers": { "type": "array", "items": { "type": "string" } },
+        "harness": { "$ref": "#/$defs/harness" },
+        "session_id": { "$ref": "#/$defs/nullableString" },
+        "turn_id": { "$ref": "#/$defs/nullableString" },
+        "event_id": { "$ref": "#/$defs/nullableString" },
+        "context": { "type": ["string", "null"], "maxLength": 280 },
+        "operation_id": { "$ref": "#/$defs/nullableString" },
+        "batch_id": { "$ref": "#/$defs/nullableString" }
+      }
+    }
+  }
+}

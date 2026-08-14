@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join, relative } from "node:path";
 
@@ -41,7 +42,12 @@ function runNodeTests(files) {
     const child = spawn(
       process.execPath,
       ["--import", "tsx", "--test", ...files],
-      { cwd: projectRoot, stdio: "inherit" },
+      {
+        cwd: projectRoot,
+        stdio: "inherit",
+        // Throwaway vaults get throwaway keys. See scripts/run-tests.mjs.
+        env: { ...process.env, OPEN_BRAIN_SECRET_DIR: join(tmpdir(), "open-brain-test-keys") },
+      },
     );
     child.once("error", reject);
     child.once("exit", (code, signal) => {

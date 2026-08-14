@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/capabilities.schema.json",
+  "title": "OpenBrain Capabilities Section",
+  "description": "The capabilities section of 00_index/vault.config.yml. Every capability ships disarmed; anything missing or malformed reads as disarmed.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "hooks": {
+      "$ref": "#/$defs/hooks"
+    },
+    "capture": {
+      "$ref": "#/$defs/capture"
+    },
+    "transcripts": {
+      "$ref": "#/$defs/transcripts"
+    },
+    "classifier": {
+      "$ref": "#/$defs/classifier"
+    },
+    "learning": {
+      "$ref": "#/$defs/learning"
+    }
+  },
+  "$defs": {
+    "hooks": {
+      "type": "object",
+      "description": "Wires Open Brain into the events of the host AI CLI. Reads the vault only and costs nothing.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "targets": {
+          "type": "array",
+          "description": "Host CLIs to wire.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": []
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "description": "Fills the staging area with candidates. Nothing reaches the kernel without human validation.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "transcripts": {
+      "type": "object",
+      "description": "Reads session transcripts from consented directories, which normally sit outside the vault.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "roots": {
+          "type": "array",
+          "description": "Directories explicitly consented to. An empty list means nothing is ever read.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "redact": {
+          "type": "boolean",
+          "description": "Strip secrets and obvious identifiers before writing anything into the vault.",
+          "default": true
+        }
+      }
+    },
+    "classifier": {
+      "type": "object",
+      "description": "Asks a model to classify staged candidates. The only capability that costs money.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "provider": {
+          "enum": [
+            "none",
+            "claude-code-subagent"
+          ],
+          "default": "none"
+        },
+        "daily_call_budget": {
+          "type": "integer",
+          "description": "Hard cap on model calls per day. A run stops when the budget is spent.",
+          "minimum": 1,
+          "default": 25
+        }
+      }
+    },
+    "learning": {
+      "type": "object",
+      "description": "Decision journal and sensors, plus the two child capabilities that draw conclusions from them.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Journal and sensors. Purely observational.",
+          "default": false
+        },
+        "evaluate": {
+          "type": "boolean",
+          "description": "Evaluate beliefs and move their confidence. Requires enabled to be true.",
+          "default": false
+        },
+        "consolidate": {
+          "type": "boolean",
+          "description": "The only subtractive operation. Requires enabled to be true, and never arms implicitly.",
+          "default": false
+        }
+      }
+    }
+  }
+}

@@ -6,21 +6,25 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rename,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
+import { capabilityIssues } from "../core/capabilities.js";
 import {
   DEFAULT_CONFIG,
+  excludedParts,
   findVaultConfigPath,
   findVaultRoot,
   loadConfig,
 } from "../core/config.js";
 import { ExpectedError } from "../core/errors.js";
+import type { VaultConfig } from "../core/types.js";
 import {
   dismissIdea,
   getFreeModeStatePath,
@@ -36,6 +40,14 @@ import {
   OPENBRAIN_LOADER_END_MARKER,
   syncLoadersFromConfig,
 } from "../loaders/index.js";
+import {
+  PREFERENCE_CORE_RELATIVE_PATH,
+  PREFERENCE_LEDGER_RELATIVE_PATH,
+  verifyRedline,
+  writeThroughRedline,
+  type RedlineReport,
+} from "../prefs/index.js";
+import { protectedRelativePaths } from "../staging/guard.js";
 
 export const ENGINE_VERSION = "0.1.0-alpha.2";
 export const OPENBRAIN_MANIFEST_FILENAME = ".open-brain.json";
@@ -70,6 +82,12 @@ export interface DoctorResult {
   missingLoaders: string[];
   localFreeModeStateFound: boolean;
   repaired: boolean;
+  /** Tamper evidence for the preference kernel. See prefs/redline.ts. */
+  redline: RedlineReport;
+  /** Configuration inconsistencies a human should read. Never blocks anything. */
+  capabilityIssues: string[];
+  /** Vault-relative paths of symlinks that resolve to a protected kernel file. */
+  preferenceKernelAliases: string[];
 }
 
 export interface FreeModeStatus {
@@ -117,13 +135,13 @@ export async function readJsonFile(path: string): Promise<unknown> {
   try {
     content = await readFile(resolvedPath, "utf8");
   } catch {
-    throw new Error(`Unable to read JSON file: ${resolvedPath}.`);
+    throw new ExpectedError(`Unable to read JSON file: ${resolvedPath}.`);
   }
 
   try {
     return JSON.parse(content) as unknown;
   } catch {
-    throw new Error(`JSON file is invalid: ${resolvedPath}.`);
+    throw new ExpectedError(`JSON file is invalid: ${resolvedPath}.`);
   }
 }
 
@@ -260,6 +278,14 @@ async function ensureInitialState(root: string): Promise<void> {
     [
       "---",
       "lifecycle: master",
+      // Per-line budgets, in characters, checked by the stop hook. A day entry
+      // gets room while it is fresh and tightens as it ages; a workstream line
+      // stays a pointer to the file that holds its detail.
+      "line_budget_day: 1200",
+      "line_budget_d1_d3: 700",
+      "line_budget_d4_d7: 250",
+      "line_budget_project: 450",
+      "line_budget_closed: 150",
       "---",
       "# Living state",
       "",
@@ -384,6 +410,33 @@ export async function resolveVaultRoot(start?: string): Promise<string> {
   return root;
 }
 
+/**
+ * Records the kernel the templates just seeded, byte for byte, without changing
+ * it. Init writes a ledger and a core that no write path ever saw, so until this
+ * runs the redline can say nothing at all about them, and a report that cannot
+ * tell reads exactly like a report that verified. The seed is the first
+ * recorded write, and every later check compares against it.
+ */
+async function recordSeededKernel(root: string): Promise<void> {
+  const seeded = [
+    { target: "ledger", relativePath: PREFERENCE_LEDGER_RELATIVE_PATH },
+    { target: "core", relativePath: PREFERENCE_CORE_RELATIVE_PATH },
+  ] as const;
+  for (const { target, relativePath } of seeded) {
+    const content = await readFile(join(root, relativePath), "utf8").catch(() => undefined);
+    if (content === undefined) {
+      continue;
+    }
+    await writeThroughRedline(root, {
+      target,
+      relativePath,
+      content,
+      command: "init",
+      validation: "vault-template",
+    });
+  }
+}
+
 export async function initVault(
   target: string,
   options: InitVaultOptions = {},
@@ -420,6 +473,7 @@ export async function initVault(
   await writeManifest(root);
   await ensureFreeModeState(root, readFreeMode(config));
   await syncLoadersFromConfig(root, config);
+  await recordSeededKernel(root);
 
   const git = options.noGit ? "skipped" : await initializeGit(root);
   return { root, copiedTemplateFiles, git };
@@ -442,6 +496,57 @@ export async function updateVault(start?: string): Promise<UpdateVaultResult> {
 
 function markerCount(contents: string, marker: string): number {
   return contents.split(marker).length - 1;
+}
+
+/**
+ * Detects, never prevents, a symlink anywhere in the vault whose target
+ * resolves to a protected preference kernel file. The pre-effect guard closes
+ * this class for any write it can see the command of; it cannot resolve a link
+ * planted by a process outside its view. This is the second of the three
+ * layers that make "detected, not impossible" true: the guard stops the
+ * creation it can see, this detects what already exists, and redline detects
+ * the write.
+ */
+async function findPreferenceKernelAliases(
+  root: string,
+  config: VaultConfig,
+): Promise<string[]> {
+  const targets = new Set<string>();
+  for (const relativePath of protectedRelativePaths(config)) {
+    const absolute = join(root, relativePath);
+    targets.add(await realpath(absolute).catch(() => resolve(absolute)));
+  }
+
+  const excluded = excludedParts(config);
+  const found: string[] = [];
+
+  async function walk(directory: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (excluded.has(entry.name.normalize("NFKD").toLowerCase())) {
+        continue;
+      }
+      const entryPath = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        const target = await realpath(entryPath).catch(() => undefined);
+        if (target !== undefined && targets.has(target)) {
+          found.push(relative(root, entryPath));
+        }
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+      }
+    }
+  }
+
+  await walk(root);
+  return found.sort();
 }
 
 export async function doctorVault(
@@ -494,6 +599,9 @@ export async function doctorVault(
     missingLoaders,
     localFreeModeStateFound: await pathExists(getFreeModeStatePath(root)),
     repaired: repair,
+    redline: await verifyRedline(root),
+    capabilityIssues: capabilityIssues(config),
+    preferenceKernelAliases: await findPreferenceKernelAliases(root, config),
   };
 }
 

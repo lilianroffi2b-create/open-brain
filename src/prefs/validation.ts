@@ -1,3 +1,4 @@
+import { ExpectedError } from "../core/errors.js";
 import {
   PREFERENCE_LEDGER_SCHEMA_VERSION,
   PREFERENCE_STATUSES,
@@ -187,6 +188,54 @@ function validatePreference(
   }
 }
 
+/**
+ * The operation index is optional and read tolerantly: a ledger written before
+ * idempotency existed simply has no operations key. When it is present it must
+ * be well formed, because a malformed index would silently stop detecting
+ * replays, which is worse than refusing to load.
+ */
+function validateOperations(value: unknown, errors: string[]): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!Array.isArray(value)) {
+    errors.push("operations must be an array when present.");
+    return;
+  }
+
+  const seen = new Set<string>();
+  value.forEach((record, index) => {
+    const label = `operations[${index}]`;
+    if (!isRecord(record)) {
+      errors.push(`${label} must be an object.`);
+      return;
+    }
+    if (!isNonEmptyString(record.operation_id)) {
+      errors.push(`${label}.operation_id must be a non-empty string.`);
+    } else if (seen.has(record.operation_id)) {
+      errors.push(`${label}.operation_id duplicates ${record.operation_id}.`);
+    } else {
+      seen.add(record.operation_id);
+    }
+    if (!isNonEmptyString(record.applied_at)) {
+      errors.push(`${label}.applied_at must be a non-empty ISO timestamp.`);
+    }
+    if (!isNonEmptyString(record.target_id)) {
+      errors.push(`${label}.target_id must be a non-empty string.`);
+    }
+    if (!isRecord(record.request)) {
+      errors.push(`${label}.request must be an object.`);
+      return;
+    }
+    if (record.request.kind !== "add" && record.request.kind !== "log") {
+      errors.push(`${label}.request.kind must be "add" or "log".`);
+    }
+    if (!isNonEmptyString(record.request.schema)) {
+      errors.push(`${label}.request.schema must be a non-empty string.`);
+    }
+  });
+}
+
 /** Validates the public v3 Hermes ledger without mutating it. */
 export function validatePreferenceLedger(value: unknown): LedgerValidationResult {
   const errors: string[] = [];
@@ -216,6 +265,8 @@ export function validatePreferenceLedger(value: unknown): LedgerValidationResult
     validatePreference(preference, index, errors, warnings, ids),
   );
 
+  validateOperations(value.operations, errors);
+
   const knownIds = new Set(
     value.preferences
       .filter(isRecord)
@@ -243,6 +294,6 @@ export function assertValidPreferenceLedger(
 ): asserts value is PreferenceLedger {
   const result = validatePreferenceLedger(value);
   if (!result.valid) {
-    throw new TypeError(`Invalid preference ledger: ${result.errors.join(" ")}`);
+    throw new ExpectedError(`Invalid preference ledger: ${result.errors.join(" ")}`);
   }
 }

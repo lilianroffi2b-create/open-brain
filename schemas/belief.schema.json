@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-brain.dev/schemas/belief.schema.json",
+  "title": "OpenBrain Belief Store",
+  "description": "The belief population of the learning layer, stored at 10_memory/learning/beliefs.json. A belief is born at confidence 3 and rank active; shadow is a sanction and never an entry state. Every application leaves a history entry, including when the confidence does not move, because that entry is the mark that stops the same decision from being applied twice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "updated_at",
+    "beliefs"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "updated_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "beliefs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/belief"
+      }
+    },
+    "operations": {
+      "type": "array",
+      "description": "Idempotency registry owned by the store: replaying an operation id with the same result is a non-event, replaying it with a different result is refused. Bounded to the 64 most recent records.",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "description": "UTC, second precision, no other format is accepted.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "digest",
+        "ts"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "ts": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "belief": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "statement",
+        "domain",
+        "origin",
+        "evidence",
+        "rank",
+        "confidence",
+        "locked",
+        "opportunities",
+        "applications",
+        "corrections",
+        "created_at",
+        "seen_at",
+        "moved_at",
+        "history"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^b_[a-z0-9]+(?:_[a-z0-9]+)*$"
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Discovered from observations, never hardcoded."
+        },
+        "origin": {
+          "enum": [
+            "declared",
+            "inferred"
+          ]
+        },
+        "ledger_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Points at a declared preference. Only a declared belief may carry one."
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "rank": {
+          "enum": [
+            "retired",
+            "shadow",
+            "active",
+            "law"
+          ],
+          "description": "Derived from the confidence: retired below 0, shadow below 3, active below 7, law at 7 and above. Rank and confidence must always agree."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 10
+        },
+        "locked": {
+          "type": "boolean",
+          "description": "Set by a human hand and never set back to false. A locked belief resists automatic decay and automatic growth alike."
+        },
+        "opportunities": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "applications": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Never greater than opportunities."
+        },
+        "corrections": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "seen_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "moved_at": {
+          "$ref": "#/$defs/timestamp",
+          "description": "Equal to the ts of the last history entry."
+        },
+        "history": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Strictly increasing in ts. Capped: the oldest entries fold into a single summary entry whose last_ts becomes a watermark, so a decision from the folded window can never be applied again.",
+          "items": {
+            "$ref": "#/$defs/history_entry"
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "occurrences",
+        "refs",
+        "quote"
+      ],
+      "properties": {
+        "occurrences": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "At least 3 for an inferred belief."
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Non-empty for an inferred belief."
+        },
+        "quote": {
+          "type": "string",
+          "maxLength": 400,
+          "description": "For a declared belief, a literal extract of its source text."
+        },
+        "decision_source": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "history_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "from",
+        "to",
+        "cause",
+        "ref"
+      ],
+      "properties": {
+        "ts": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "from": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Null on the creation entry only."
+        },
+        "to": {
+          "type": "number"
+        },
+        "cause": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Producers inside the layer write creation, application_confirmed, application_corrected, dormancy, human_engrave, human_retract, or history_summary. The field stays open so a later producer can add a cause without a data migration."
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "For an application, the decision id. This is the idempotency key."
+        },
+        "folded": {
+          "$ref": "#/$defs/folded",
+          "description": "Present on a history_summary entry, and only there."
+        }
+      }
+    },
+    "folded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "first_ts",
+        "last_ts",
+        "causes"
+      ],
+      "properties": {
+        "entries": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "first_ts": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "last_ts": {
+          "$ref": "#/$defs/timestamp",
+          "description": "Watermark: any guarded application timed at or before this instant is refused as already settled."
+        },
+        "causes": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "How many entries were folded, by cause. The overflow is summarized, never dropped in silence.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  }
+}

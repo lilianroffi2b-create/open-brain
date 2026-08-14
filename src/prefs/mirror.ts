@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
+import { atomicWriteText } from "../core/fs-atomic.js";
 import { DEFAULT_LOADER_FILENAMES, type LoaderFilename } from "../loaders/markers.js";
 import { renderPreferenceMirror } from "./render.js";
 import type { PreferenceLedger } from "./types.js";
@@ -93,18 +93,6 @@ function nodeErrorHasCode(error: unknown, code: string): boolean {
   );
 }
 
-async function writeAtomically(path: string, content: string): Promise<void> {
-  const directory = dirname(path);
-  const temporaryPath = join(directory, `.openbrain-prefs-${randomUUID()}.tmp`);
-  await mkdir(directory, { recursive: true });
-  try {
-    await writeFile(temporaryPath, content, "utf8");
-    await rename(temporaryPath, path);
-  } finally {
-    await unlink(temporaryPath).catch(() => undefined);
-  }
-}
-
 export interface PreferenceMirrorSyncResult {
   path: string;
   changed: boolean;
@@ -129,7 +117,7 @@ export async function syncPreferenceMirrorFile(
 
   const next = syncPreferenceMirrorContent(current, ledger);
   if (next !== current) {
-    await writeAtomically(path, next);
+    await atomicWriteText(path, next);
   }
   return { path, changed: next !== current };
 }
